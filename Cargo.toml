@@ -22,3 +22,8 @@ tree-sitter-scala = "0.24"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "analysis"
+harness = false

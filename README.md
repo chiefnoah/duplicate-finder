@@ -35,6 +35,17 @@ cargo build --release
 
 The binary is written to `target/release/df`.
 
+### Nix development shell
+
+The shell provides Rust, Cargo, rustfmt, Clippy, and a C compiler for the tree-sitter grammars.
+On macOS, it also provides `libiconv` and selects the Nix linker.
+
+```sh
+nix develop path:.
+cargo test
+cargo build --release
+```
+
 ## Usage
 
 ```sh
@@ -93,8 +104,83 @@ Clone Group 2 (2 clone(s), 28 nodes, 85% similarity, near)
 
 Progress information is printed to stderr.
 
+### Threads
+
+The tool uses available CPU threads by default.
+It processes files, near-duplicate comparisons, and exact-group subsumption checks in parallel.
+Near-duplicate groups retain the same input order and similarity rules across thread counts.
+
+To limit the worker count, set `RAYON_NUM_THREADS`:
+
+```sh
+RAYON_NUM_THREADS=4 df ./my-project
+```
+
 ## Running tests
 
 ```sh
 cargo test
+```
+
+## Benchmarks
+
+The Criterion suite measures analysis stages, thread scaling, and three isolated kernels.
+It does not change production code.
+
+Run the suite:
+
+```sh
+nix develop path:.
+cargo bench --bench analysis
+```
+
+Run benchmarks on an idle system.
+For comparisons, keep the compiler, codebase, and worker count unchanged.
+
+The full suite takes several minutes.
+Criterion writes HTML reports to `target/criterion/report/index.html`.
+
+| Group | Measured work |
+|-------|---------------|
+| `parse` | File reads and tree-sitter parser construction and execution |
+| `fragments` | AST traversal, node counts, and structural hashes |
+| `exact` | Fragment copies, exact groups, and subsumption checks |
+| `near` | Hash counts, buckets, node lookup, sequences, LCS comparisons, and group deduplication |
+| `pipeline` | All analysis stages, without directory traversal or report output |
+| `nested_fragments` | Fragment extraction at depths of 8, 32, and 128 |
+| `sequences` | Node-kind sequences for functions with 32, 128, and 512 statements |
+| `lcs` | Similarity comparisons for sequences with 32, 128, and 512 elements |
+
+Stage benchmarks use 32 or 128 Rust files with one, four, or eight workers.
+Worker counts are explicit and do not depend on `RAYON_NUM_THREADS`.
+The `exact` fixture contains normalized duplicates.
+The `near` fixture contains unique structural hashes with a threshold of `0.8`.
+The `sparse` fixture uses the same files with a threshold of `1.0`, which forces unsuccessful pair comparisons.
+Fixture assertions confirm these detection paths before measurement.
+
+Fixture creation and thread-pool construction occur outside measurements.
+Stage results include output destruction and thread-pool dispatch.
+File reads use the operating system cache after warmup.
+Compare stages within the same fixture and worker count to locate slow stages.
+Kernel results explain scaling, but their input sizes differ from the stage fixtures.
+
+Run only the sparse workload:
+
+```sh
+cargo bench --bench analysis -- sparse
+```
+
+Run a real codebase with eight workers:
+
+```sh
+DF_BENCH_PATH=/path/to/codebase cargo bench --bench analysis -- '/real/t8'
+```
+
+The real-codebase suite uses all supported extensions, `--min-nodes 5`, and a threshold of `0.8`.
+It fails on unreadable files instead of silently omitting them.
+
+For a smoke test without statistical measurements, run:
+
+```sh
+cargo bench --bench analysis -- --test
 ```

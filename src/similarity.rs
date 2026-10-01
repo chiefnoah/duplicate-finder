@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 use crate::clones::CloneGroup;
@@ -125,87 +126,95 @@ pub fn find_near_duplicates(
             .push(frag);
     }
 
-    let mut groups: Vec<CloneGroup> = Vec::new();
-
-    for (_key, bucket) in &buckets {
-        if bucket.len() < 2 {
-            continue;
-        }
-
-        // Pairwise comparison within bucket.
-        // Precompute kind sequences.
-        let sequences: Vec<Option<Vec<String>>> = bucket
-            .iter()
-            .map(|frag| {
-                if let Some((tree, source)) = trees.get(&frag.file) {
+    // Keep bucket order so thread schedules do not affect sort ties or deduplication.
+    let buckets: Vec<_> = buckets.into_values().collect();
+    let mut groups: Vec<CloneGroup> = buckets
+        .par_iter()
+        .filter(|bucket| bucket.len() >= 2)
+        .flat_map_iter(|bucket| {
+            let sequences: Vec<Option<Vec<String>>> = bucket
+                .par_iter()
+                .map(|frag| {
+                    let (tree, source) = trees.get(&frag.file)?;
                     find_node_at(tree, frag.start_line, frag.end_line)
                         .map(|node| extract_kind_sequence(node, source.as_bytes()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+                })
+                .collect();
 
-        // Track which fragments have been grouped.
-        let mut grouped: Vec<bool> = vec![false; bucket.len()];
-
-        for i in 0..bucket.len() {
-            if grouped[i] {
-                continue;
-            }
-            let Some(ref seq_i) = sequences[i] else {
-                continue;
-            };
-
-            let mut group_frags = vec![(*bucket[i]).clone()];
-
-            for j in (i + 1)..bucket.len() {
-                if grouped[j] {
-                    continue;
-                }
-                let Some(ref seq_j) = sequences[j] else {
-                    continue;
-                };
-
-                let sim = tree_similarity(seq_i, seq_j);
-                if sim >= threshold {
-                    group_frags.push((*bucket[j]).clone());
-                    grouped[j] = true;
-                }
-            }
-
-            if group_frags.len() >= 2 {
-                let node_count = group_frags[0].node_count;
-                // Compute average similarity for the group.
-                let avg_sim = if group_frags.len() == 2 {
-                    let seq_0 = sequences[i].as_ref().unwrap();
-                    let idx_1 = bucket
-                        .iter()
-                        .position(|f| {
-                            f.file == group_frags[1].file
-                                && f.start_line == group_frags[1].start_line
-                        })
-                        .unwrap();
-                    tree_similarity(seq_0, sequences[idx_1].as_ref().unwrap())
-                } else {
-                    // Approximate: just use threshold as lower bound.
-                    threshold
-                };
-
-                groups.push(CloneGroup {
-                    fragments: group_frags,
-                    node_count,
-                    similarity: avg_sim,
-                });
-                grouped[i] = true;
-            }
-        }
-    }
+            group_bucket(bucket, &sequences, threshold)
+        })
+        .collect();
 
     groups.sort_by(|a, b| b.node_count.cmp(&a.node_count));
 
     // Deduplicate groups that have the same set of fragment locations.
     dedup_groups(&mut groups);
+
+    groups
+}
+
+fn group_bucket(
+    bucket: &[&Fragment],
+    sequences: &[Option<Vec<String>>],
+    threshold: f64,
+) -> Vec<CloneGroup> {
+    let mut groups = Vec::new();
+    let mut grouped = vec![false; bucket.len()];
+
+    for i in 0..bucket.len() {
+        if grouped[i] {
+            continue;
+        }
+        let Some(ref seq_i) = sequences[i] else {
+            continue;
+        };
+
+        // Compare one row in parallel; avoid a quadratic pairwise score table.
+        let matches: Vec<usize> = ((i + 1)..bucket.len())
+            .into_par_iter()
+            .filter(|&j| {
+                if grouped[j] {
+                    return false;
+                }
+                let Some(ref seq_j) = sequences[j] else {
+                    return false;
+                };
+
+                tree_similarity(seq_i, seq_j) >= threshold
+            })
+            .collect();
+
+        if matches.is_empty() {
+            continue;
+        }
+
+        // Commit matches in input order to preserve greedy, non-transitive groups.
+        let mut group_frags = vec![(*bucket[i]).clone()];
+        for j in matches {
+            group_frags.push((*bucket[j]).clone());
+            grouped[j] = true;
+        }
+
+        // Preserve the existing score and location lookup for two-member groups.
+        let similarity = if group_frags.len() == 2 {
+            let idx = bucket
+                .iter()
+                .position(|f| {
+                    f.file == group_frags[1].file && f.start_line == group_frags[1].start_line
+                })
+                .unwrap();
+            tree_similarity(seq_i, sequences[idx].as_ref().unwrap())
+        } else {
+            threshold
+        };
+
+        groups.push(CloneGroup {
+            node_count: group_frags[0].node_count,
+            fragments: group_frags,
+            similarity,
+        });
+        grouped[i] = true;
+    }
 
     groups
 }
@@ -260,6 +269,164 @@ fn find_node_at_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serial_groups(
+        bucket: &[&Fragment],
+        sequences: &[Option<Vec<String>>],
+        threshold: f64,
+    ) -> Vec<CloneGroup> {
+        let mut groups = Vec::new();
+        let mut grouped = vec![false; bucket.len()];
+
+        for i in 0..bucket.len() {
+            if grouped[i] {
+                continue;
+            }
+            let Some(seq_i) = &sequences[i] else {
+                continue;
+            };
+            let mut fragments = vec![(*bucket[i]).clone()];
+
+            for j in (i + 1)..bucket.len() {
+                if grouped[j] {
+                    continue;
+                }
+                let Some(seq_j) = &sequences[j] else {
+                    continue;
+                };
+                if tree_similarity(seq_i, seq_j) >= threshold {
+                    fragments.push((*bucket[j]).clone());
+                    grouped[j] = true;
+                }
+            }
+
+            if fragments.len() < 2 {
+                continue;
+            }
+            let similarity = if fragments.len() == 2 {
+                let idx = bucket
+                    .iter()
+                    .position(|f| {
+                        f.file == fragments[1].file && f.start_line == fragments[1].start_line
+                    })
+                    .unwrap();
+                tree_similarity(seq_i, sequences[idx].as_ref().unwrap())
+            } else {
+                threshold
+            };
+            groups.push(CloneGroup {
+                fragments,
+                node_count: bucket[i].node_count,
+                similarity,
+            });
+            grouped[i] = true;
+        }
+
+        groups
+    }
+
+    fn fixture_fragment(index: usize) -> Fragment {
+        Fragment {
+            file: format!("{index}.rs").into(),
+            start_line: 1,
+            end_line: 2,
+            node_count: 12,
+            hash: index as u64,
+            kind: "function_item".into(),
+        }
+    }
+
+    #[test]
+    fn parallel_matches_serial() {
+        let fragments: Vec<_> = (0..96).map(fixture_fragment).collect();
+        let bucket: Vec<_> = fragments.iter().collect();
+        let sequences: Vec<_> = (0..fragments.len())
+            .map(|i| {
+                if i % 11 == 0 {
+                    return None;
+                }
+                Some((0..12).map(|j| format!("{}", (i >> (j % 6)) % 3)).collect())
+            })
+            .collect();
+
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for threshold in [0.0, 0.5, 0.75, 1.0, f64::NAN] {
+                let expected = serial_groups(&bucket, &sequences, threshold);
+                let actual = pool.install(|| group_bucket(&bucket, &sequences, threshold));
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_preserves_greedy_groups() {
+        // A matches B and B matches C, but A does not match C.
+        let fragments: Vec<_> = (0..3).map(fixture_fragment).collect();
+        let bucket: Vec<_> = fragments.iter().collect();
+        let sequences: Vec<_> = [
+            ["a", "b", "c", "d"],
+            ["a", "b", "c", "e"],
+            ["a", "b", "e", "e"],
+        ]
+        .into_iter()
+        .map(|seq| Some(seq.into_iter().map(String::from).collect()))
+        .collect();
+
+        let groups = group_bucket(&bucket, &sequences, 0.75);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].fragments.len(), 2);
+        assert_eq!(groups[0].fragments[0].file, fragments[0].file);
+        assert_eq!(groups[0].fragments[1].file, fragments[1].file);
+        assert_eq!(groups[0].similarity, 0.75);
+    }
+
+    #[test]
+    fn parallel_keeps_fragment_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fragments = Vec::new();
+        let mut trees = HashMap::new();
+
+        for (i, operator) in ["+", "-", "*", "/", "%", "=="].into_iter().enumerate() {
+            let path = dir.path().join(format!("{i}.rs"));
+            std::fs::write(&path, format!("fn f() {{ let x = a {operator} b; }}")).unwrap();
+            let (tree, source) = crate::parser::parse_file(&path).unwrap();
+            let fragment = crate::hasher::collect_fragments(&tree, &source, &path, 5)
+                .into_iter()
+                .find(|f| f.kind == "function_item")
+                .unwrap();
+            fragments.push(fragment);
+            trees.insert(path, (tree, source));
+        }
+
+        // Exclude exact hashes, small fragments, and absent trees or nodes.
+        fragments[1].hash = fragments[0].hash;
+        fragments[2].node_count = 1;
+        fragments.push(fixture_fragment(100));
+        let mut absent_node = fragments[3].clone();
+        absent_node.hash = u64::MAX;
+        absent_node.start_line = 100;
+        fragments.push(absent_node);
+
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let groups = pool.install(|| find_near_duplicates(&fragments, &trees, 0.8, 5));
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].fragments.len(), 3);
+            assert_eq!(groups[0].similarity, 0.8);
+            let paths: Vec<_> = groups[0].fragments.iter().map(|f| &f.file).collect();
+            assert_eq!(
+                paths,
+                fragments[3..6].iter().map(|f| &f.file).collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn test_tree_similarity_identical() {

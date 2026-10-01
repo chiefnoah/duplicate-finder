@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 use crate::hasher::Fragment;
@@ -34,10 +35,10 @@ pub fn find_clone_groups(fragments: Vec<Fragment>) -> Vec<CloneGroup> {
         })
         .collect();
 
-    // Remove subsumed clones within each group.
-    for group in &mut groups {
+    // Each group owns its fragments, so subsumption checks need no shared state.
+    groups.par_iter_mut().for_each(|group| {
         remove_subsumed(&mut group.fragments);
-    }
+    });
 
     // Filter out groups that collapsed to <2 after subsumption removal.
     groups.retain(|g| g.fragments.len() >= 2);
