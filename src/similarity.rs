@@ -273,7 +273,8 @@ pub fn find_near_duplicates(
     let buckets: Vec<_> = buckets.into_values().collect();
     let mut groups: Vec<CloneGroup> = buckets
         .par_iter()
-        .filter(|bucket| bucket.len() >= 2)
+        // Same-hash pairs cannot form near groups, so avoid their AST traversals.
+        .filter(|bucket| bucket.iter().any(|fragment| fragment.hash != bucket[0].hash))
         .flat_map_iter(|bucket| {
             let sequences: Vec<Option<Vec<String>>> = bucket
                 .par_iter()

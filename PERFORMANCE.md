@@ -39,3 +39,9 @@ Criterion stores full measurements under `target/criterion`.
 | Near detection, 2 files, 1 thread | 62.736 µs |
 | Plain source output, 32 members | 1.695 ms |
 | Color source output, 32 members | 2.233 ms |
+
+## Individual changes
+
+| Task | Focused case | Before | After |
+|---|---|---:|---:|
+| `tsk-12`: skip same-hash buckets | Near detection, exact corpus, 128 files, 1 thread | 3.482 ms | 10.825 µs |
