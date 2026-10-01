@@ -165,6 +165,57 @@ fn render_text(
 mod tests {
     use super::*;
 
+    fn fixture() -> (Vec<Fragment>, HashMap<PathBuf, (tree_sitter::Tree, String)>) {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&crate::parser::language_for_extension("rs").unwrap()).unwrap();
+        let mut fragments = Vec::new();
+        let mut trees = HashMap::new();
+        for (file, source) in [
+            ("a.rs", "fn first() { let α = a + b; }\n"),
+            ("b.rs", "fn second() { let β = a - b; }\n"),
+            ("c.rs", "fn third() { let γ = a + b; }\n"),
+        ] {
+            let tree = parser.parse(source, None).unwrap();
+            let file = PathBuf::from(file);
+            let fragment = crate::hasher::collect_fragments(&tree, source, &file, 5)
+                .into_iter().find(|fragment| fragment.kind == "function_item").unwrap();
+            fragments.push(fragment);
+            trees.insert(file, (tree, source.into()));
+        }
+        (fragments, trees)
+    }
+
+    #[test]
+    fn pair_output_snapshot() {
+        let (fragments, trees) = fixture();
+        for palette in [Palette::Plain, Palette::Color] {
+            let mut renderer = Renderer::new(&trees, palette);
+            let result = renderer.pair(&fragments[0], &fragments[1]).unwrap();
+            let header = "--- a.rs:1-1\n+++ b.rs:1-1\n";
+            let expected = match palette {
+                Palette::Plain => format!("{header}~    1 | fn first() {{ let α = a + b; }}\n~    1 | fn second() {{ let β = a - b; }}\n"),
+                Palette::Color => format!("{header}{}{}", color_line("first", "α", "+"), color_line("second", "β", "-")),
+            };
+            assert_eq!(result, expected);
+            assert_eq!(result, renderer.pair(&fragments[0], &fragments[1]).unwrap());
+        }
+    }
+
+    // Frozen ANSI transitions from the corrected, unoptimized renderer.
+    fn color_line(name: &str, identifier: &str, operator: &str) -> String {
+        format!(concat!(
+            "~    1 | \x1b[0m\x1b[95m\x1b[1m\x1b[48;5;22mfn\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[94m\x1b[1m\x1b[48;5;22m{}\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m()\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m{{\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[95m\x1b[1m\x1b[48;5;22mlet\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m{}\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m=\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22ma\x1b[0m\x1b[39m {} ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22mb;\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m}}\x1b[0m\n"
+        ), name, identifier, operator)
+    }
+
     #[test]
     fn unicode_and_color_layers() {
         let text = "let α = 1;\n";

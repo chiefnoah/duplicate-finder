@@ -538,6 +538,17 @@ mod tests {
     }
 
     #[test]
+    fn homogeneous_buckets_stay_empty() {
+        let (fragments, trees) = near_fixture(&[
+            "fn a() { let x = 1; }\n".into(),
+            "fn b() { let y = 2; }\n".into(),
+        ]);
+        for threshold in [0.0, 0.8, 1.0] {
+            assert!(find_near_duplicates(&fragments, &trees, threshold, 5).is_empty());
+        }
+    }
+
+    #[test]
     fn same_line_nodes_stay_distinct() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("same.rs");
@@ -656,7 +667,7 @@ mod tests {
             let mut fragments = vec![(*bucket[i]).clone()];
 
             for j in (i + 1)..bucket.len() {
-                if grouped[j] {
+                if grouped[j] || bucket[i].hash == bucket[j].hash {
                     continue;
                 }
                 let Some(seq_j) = &sequences[j] else {
@@ -709,7 +720,11 @@ mod tests {
 
     #[test]
     fn parallel_matches_serial() {
-        let fragments: Vec<_> = (0..96).map(fixture_fragment).collect();
+        let mut fragments: Vec<_> = (0..96).map(fixture_fragment).collect();
+        // Include repeated hashes without excluding their near candidates.
+        for fragment in &mut fragments {
+            fragment.hash %= 13;
+        }
         let bucket: Vec<_> = fragments.iter().collect();
         let sequences: Vec<_> = (0..fragments.len())
             .map(|i| {
