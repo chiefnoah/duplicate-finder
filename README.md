@@ -13,7 +13,8 @@ A command-line tool that detects code clones across codebases using AST-based st
 Fragment extraction computes each node's normalized hash and subtree count once.
 It retains metadata only for meaningful roots and preserves preorder.
 Near-duplicate detection rejects pairs whose sequence-length ratio cannot meet the threshold.
-It still uses LCS for the remaining pairs.
+At threshold `1.0`, it compares sequences directly.
+For other thresholds, LCS excludes shared prefixes and suffixes but retains their contribution to the score.
 
 ## Supported languages
 
@@ -155,6 +156,8 @@ Criterion writes HTML reports to `target/criterion/report/index.html`.
 | `nested_fragments` | Fragment extraction at depths of 8, 32, and 128 |
 | `sequences` | Node-kind sequences for functions with 32, 128, and 512 statements |
 | `lcs` | Similarity comparisons for sequences with 32, 128, and 512 elements |
+| `lcs_identical` | Similarity comparisons for identical sequences |
+| `lcs_local_edit` | Similarity comparisons for sequences with one changed element |
 
 Stage benchmarks use 32 or 128 Rust files with one, four, or eight workers.
 Worker counts are explicit and do not depend on `RAYON_NUM_THREADS`.

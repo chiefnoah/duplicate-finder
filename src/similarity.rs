@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use crate::clones::CloneGroup;
 use crate::hasher::Fragment;
 
+const FULL_SIMILARITY: f64 = 1.0;
+
 /// Compute structural similarity between two AST fragments.
 /// Uses a normalised node-kind sequence comparison (LCS-based).
 /// Returns a value in [0.0, 1.0].
 pub fn tree_similarity(a: &[String], b: &[String]) -> f64 {
     if a.is_empty() && b.is_empty() {
-        return 1.0;
+        return FULL_SIMILARITY;
     }
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -22,6 +24,24 @@ pub fn tree_similarity(a: &[String], b: &[String]) -> f64 {
 
 /// Longest common subsequence length (standard DP).
 fn lcs_length(a: &[String], b: &[String]) -> usize {
+    // Shared ends always belong to an optimal LCS; compare only the different middle.
+    let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
+    let a = &a[prefix..];
+    let b = &b[prefix..];
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let a = &a[..a.len() - suffix];
+    let b = &b[..b.len() - suffix];
+    let shared = prefix + suffix;
+
+    if a.is_empty() || b.is_empty() {
+        return shared;
+    }
+
     let m = a.len();
     let n = b.len();
     // Use two rows to save memory.
@@ -40,7 +60,7 @@ fn lcs_length(a: &[String], b: &[String]) -> usize {
         curr.iter_mut().for_each(|x| *x = 0);
     }
 
-    prev[n]
+    shared + prev[n]
 }
 
 /// Extract a pre-order sequence of normalised node kinds from an AST subtree.
@@ -180,12 +200,7 @@ fn group_bucket(
                     return false;
                 };
 
-                // Use actual sequence counts: line lookup can select a larger AST node.
-                if !can_match(seq_i.len(), seq_j.len(), threshold) {
-                    return false;
-                }
-
-                tree_similarity(seq_i, seq_j) >= threshold
+                matches(seq_i, seq_j, threshold)
             })
             .collect();
 
@@ -224,10 +239,24 @@ fn group_bucket(
     groups
 }
 
+fn matches(a: &[String], b: &[String], threshold: f64) -> bool {
+    // Use actual sequence counts: line lookup can select a larger AST node.
+    if !can_match(a.len(), b.len(), threshold) {
+        return false;
+    }
+
+    // A full LCS of equal-length sequences requires equality, not a DP table.
+    if threshold == FULL_SIMILARITY {
+        return a == b;
+    }
+
+    tree_similarity(a, b) >= threshold
+}
+
 fn can_match(a: usize, b: usize, threshold: f64) -> bool {
     let largest = a.max(b);
     let bound = if largest == 0 {
-        1.0
+        FULL_SIMILARITY
     } else {
         a.min(b) as f64 / largest as f64
     };
@@ -285,6 +314,53 @@ fn find_node_at_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Use a full DP table as an independent reference for optimized comparisons.
+    fn reference_lcs(a: &[String], b: &[String]) -> usize {
+        let mut table = vec![vec![0; b.len() + 1]; a.len() + 1];
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                table[i][j] = if a[i - 1] == b[j - 1] {
+                    table[i - 1][j - 1] + 1
+                } else {
+                    table[i - 1][j].max(table[i][j - 1])
+                };
+            }
+        }
+        table[a.len()][b.len()]
+    }
+
+    fn reference_similarity(a: &[String], b: &[String]) -> f64 {
+        let largest = a.len().max(b.len());
+        if largest == 0 {
+            return 1.0;
+        }
+        reference_lcs(a, b) as f64 / largest as f64
+    }
+
+    #[test]
+    fn lcs_matches_reference() {
+        let sequences: Vec<Vec<String>> = (0..=5)
+            .flat_map(|length| {
+                (0..(1 << length)).map(move |bits| {
+                    (0..length)
+                        .map(|index| if (bits >> index) & 1 == 0 { "a" } else { "b" }.to_string())
+                        .collect()
+                })
+            })
+            .collect();
+
+        for a in &sequences {
+            for b in &sequences {
+                assert_eq!(lcs_length(a, b), reference_lcs(a, b), "{a:?} {b:?}");
+                let expected = reference_similarity(a, b);
+                assert_eq!(tree_similarity(a, b), expected);
+                for threshold in [0.0, 0.5, 0.8, 1.0, 2.0, f64::NAN, expected] {
+                    assert_eq!(matches(a, b, threshold), expected >= threshold);
+                }
+            }
+        }
+    }
 
     #[test]
     fn size_bound_keeps_matches() {
@@ -349,7 +425,7 @@ mod tests {
                 let Some(seq_j) = &sequences[j] else {
                     continue;
                 };
-                if tree_similarity(seq_i, seq_j) >= threshold {
+                if reference_similarity(seq_i, seq_j) >= threshold {
                     fragments.push((*bucket[j]).clone());
                     grouped[j] = true;
                 }
@@ -365,7 +441,7 @@ mod tests {
                         f.file == fragments[1].file && f.start_line == fragments[1].start_line
                     })
                     .unwrap();
-                tree_similarity(seq_i, sequences[idx].as_ref().unwrap())
+                reference_similarity(seq_i, sequences[idx].as_ref().unwrap())
             } else {
                 threshold
             };

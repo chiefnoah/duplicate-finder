@@ -371,6 +371,27 @@ fn bench_kernels(c: &mut Criterion) {
         });
     }
     lcs.finish();
+
+    // Distinguish shared-end fast paths from the shifted-sequence worst case.
+    for (name, replacement) in [
+        ("lcs_identical", None),
+        ("lcs_local_edit", Some("different_kind")),
+    ] {
+        let mut group = c.benchmark_group(name);
+        for length in SEQUENCE_LENGTHS {
+            let a: Vec<_> = (0..length)
+                .map(|index| format!("kind_{}", index % KIND_VARIANTS))
+                .collect();
+            let mut b = a.clone();
+            if let Some(kind) = replacement {
+                b[length / 2] = kind.into();
+            }
+            group.bench_function(BenchmarkId::from_parameter(length), |bench| {
+                bench.iter(|| similarity::tree_similarity(black_box(&a), black_box(&b)));
+            });
+        }
+        group.finish();
+    }
 }
 
 criterion_group! {
