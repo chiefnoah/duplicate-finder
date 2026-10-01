@@ -316,17 +316,15 @@ fn group_bucket(
         };
 
         // Compare one row in parallel; avoid a quadratic pairwise score table.
-        let matches: Vec<usize> = ((i + 1)..bucket.len())
+        let matches: Vec<(usize, f64)> = ((i + 1)..bucket.len())
             .into_par_iter()
-            .filter(|&j| {
+            .filter_map(|j| {
                 if grouped[j] || bucket[i].hash == bucket[j].hash {
-                    return false;
+                    return None;
                 }
-                let Some(ref seq_j) = sequences[j] else {
-                    return false;
-                };
+                let seq_j = sequences[j].as_ref()?;
 
-                matches(seq_i, seq_j, threshold)
+                match_score(seq_i, seq_j, threshold).map(|score| (j, score))
             })
             .collect();
 
@@ -334,27 +332,15 @@ fn group_bucket(
             continue;
         }
 
+        // Reuse the accepted pair score; larger groups retain the threshold label.
+        let similarity = if matches.len() == 1 { matches[0].1 } else { threshold };
+
         // Commit matches in input order to preserve greedy, non-transitive groups.
         let mut group_frags = vec![(*bucket[i]).clone()];
-        for j in matches {
+        for (j, _) in matches {
             group_frags.push((*bucket[j]).clone());
             grouped[j] = true;
         }
-
-        // Preserve the existing score and location lookup for two-member groups.
-        let similarity = if group_frags.len() == 2 {
-            let idx = bucket
-                .iter()
-                .position(|f| {
-                    f.file == group_frags[1].file
-                        && f.bytes == group_frags[1].bytes
-                        && f.kind == group_frags[1].kind
-                })
-                .unwrap();
-            tree_similarity(seq_i, sequences[idx].as_ref().unwrap())
-        } else {
-            threshold
-        };
 
         groups.push(CloneGroup {
             node_count: group_frags[0].node_count,
@@ -367,18 +353,24 @@ fn group_bucket(
     groups
 }
 
-fn matches<T: PartialEq>(a: &[T], b: &[T], threshold: f64) -> bool {
+fn match_score<T: PartialEq>(a: &[T], b: &[T], threshold: f64) -> Option<f64> {
     // LCS cannot exceed the smaller sequence length.
     if !can_match(a.len(), b.len(), threshold) {
-        return false;
+        return None;
     }
 
     // A full LCS of equal-length sequences requires equality, not a DP table.
     if threshold == FULL_SIMILARITY {
-        return a == b;
+        return (a == b).then_some(FULL_SIMILARITY);
     }
 
-    tree_similarity(a, b) >= threshold
+    let score = tree_similarity(a, b);
+    (score >= threshold).then_some(score)
+}
+
+#[cfg(test)]
+fn matches<T: PartialEq>(a: &[T], b: &[T], threshold: f64) -> bool {
+    match_score(a, b, threshold).is_some()
 }
 
 fn can_match(a: usize, b: usize, threshold: f64) -> bool {
@@ -649,6 +641,7 @@ mod tests {
                 assert_eq!(tree_similarity(a, b), expected);
                 for threshold in [0.0, 0.5, 0.8, 1.0, 2.0, f64::NAN, expected] {
                     assert_eq!(matches(a, b, threshold), expected >= threshold);
+                    assert_eq!(match_score(a, b, threshold), (expected >= threshold).then_some(expected));
                 }
             }
         }

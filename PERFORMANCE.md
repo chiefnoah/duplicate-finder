@@ -46,6 +46,10 @@ Criterion stores full measurements under `target/criterion`.
 |---|---|---:|---:|
 | `tsk-12`: skip same-hash buckets | Near detection, exact corpus, 128 files, 1 thread | 3.482 ms | 10.825 µs |
 | `tsk-13`: borrow node-kind strings | Sequence extraction, 512 statements | 383.920 µs | 300.860 µs |
+| `tsk-14`: reuse pair scores | Near detection, 2 files, 1 thread | 53.507 µs | 52.158 µs |
+
+The pair-score measurement falls within the Criterion noise threshold.
+This change removes duplicate LCS work, but this local-edit fixture shows no clear speedup.
 
 The pale-overlay change preceded `tsk-13`.
 Later color-output comparisons must use the pale-overlay version as their baseline.
