@@ -47,6 +47,12 @@ Criterion stores full measurements under `target/criterion`.
 | `tsk-12`: skip same-hash buckets | Near detection, exact corpus, 128 files, 1 thread | 3.482 ms | 10.825 µs |
 | `tsk-13`: borrow node-kind strings | Sequence extraction, 512 statements | 383.920 µs | 300.860 µs |
 | `tsk-14`: reuse pair scores | Near detection, 2 files, 1 thread | 53.507 µs | 52.158 µs |
+| `tsk-15`: shorter rows without clearing | Shifted LCS, 512 tokens | 716.350 µs | 695.520 µs |
+| `tsk-15`: shorter rows without clearing | Asymmetric LCS, 128 then 512 tokens | 183.800 µs | 178.040 µs |
+
+The single-row LCS experiment passed equivalence tests but increased several kernel times by 4–9%.
+The retained implementation uses two rows and omits redundant clearing.
+Both rows use the shorter middle sequence for their width.
 
 The pair-score measurement falls within the Criterion noise threshold.
 This change removes duplicate LCS work, but this local-edit fixture shows no clear speedup.

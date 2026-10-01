@@ -20,10 +20,10 @@ mod parser;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/similarity.rs"]
 mod similarity;
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 #[path = "../src/comparison.rs"]
 mod comparison;
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 #[path = "../src/syntax.rs"]
 mod syntax;
 
@@ -379,6 +379,18 @@ fn bench_kernels(c: &mut Criterion) {
         });
     }
     lcs.finish();
+
+    let mut asymmetric = c.benchmark_group("lcs_asymmetric");
+    for length in SEQUENCE_LENGTHS {
+        let long: Vec<_> = (0..length).map(|index| format!("kind_{}", index % KIND_VARIANTS)).collect();
+        let short: Vec<_> = (0..length / 4).map(|index| format!("kind_{}", (index + 1) % KIND_VARIANTS)).collect();
+        for (name, a, b) in [("short_first", &short, &long), ("long_first", &long, &short)] {
+            asymmetric.bench_function(BenchmarkId::new(name, length), |bench| {
+                bench.iter(|| similarity::tree_similarity(black_box(a), black_box(b)));
+            });
+        }
+    }
+    asymmetric.finish();
 
     // Distinguish shared-end fast paths from the shifted-sequence worst case.
     for (name, replacement) in [

@@ -182,12 +182,12 @@ fn lcs_length<T: PartialEq>(a: &[T], b: &[T]) -> usize {
         return shared;
     }
 
+    // Use the shorter row width. Every cell is overwritten, so no clearing is needed.
+    let (a, b) = if a.len() < b.len() { (b, a) } else { (a, b) };
     let m = a.len();
     let n = b.len();
-    // Use two rows to save memory.
     let mut prev = vec![0usize; n + 1];
     let mut curr = vec![0usize; n + 1];
-
     for i in 1..=m {
         for j in 1..=n {
             if a[i - 1] == b[j - 1] {
@@ -197,7 +197,6 @@ fn lcs_length<T: PartialEq>(a: &[T], b: &[T]) -> usize {
             }
         }
         std::mem::swap(&mut prev, &mut curr);
-        curr.iter_mut().for_each(|x| *x = 0);
     }
 
     shared + prev[n]
@@ -670,6 +669,17 @@ mod tests {
                     assert_eq!(can_match(a, b, threshold), similarity >= threshold);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn asymmetric_lcs_matches() {
+        let kinds = ["a", "b", "c", "d", "e"];
+        for lengths in [(0, 257), (1, 257), (17, 257), (257, 17)] {
+            let a: Vec<_> = (0..lengths.0).map(|index| kinds[index % kinds.len()]).collect();
+            let b: Vec<_> = (0..lengths.1).map(|index| kinds[(index + 1) % kinds.len()]).collect();
+            assert_eq!(lcs_length(&a, &b), reference_lcs(&a, &b));
+            assert_eq!(tree_similarity(&a, &b), reference_similarity(&a, &b));
         }
     }
 
