@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::{hasher::Fragment, similarity, syntax};
 
 const RESET: &str = "\x1b[0m";
-const MATCHED: &str = "\x1b[1m\x1b[48;5;22m";
+const MATCHED: &str = "\x1b[48;5;194m";
 const DEFAULT: &str = "\x1b[39m";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,7 @@ fn render_text(
                 .filter(|span| span.bytes.contains(&position))
                 .map(|span| span.color)
                 .unwrap_or(DEFAULT);
+            let color = if similar { syntax::overlay_color(color) } else { color };
             if !character.is_whitespace() {
                 if similar {
                     matched_count += 1;
@@ -201,18 +202,18 @@ mod tests {
         }
     }
 
-    // Frozen ANSI transitions from the corrected, unoptimized renderer.
+    // Fixed ANSI transitions for the pale overlay and readable syntax foregrounds.
     fn color_line(name: &str, identifier: &str, operator: &str) -> String {
         format!(concat!(
-            "~    1 | \x1b[0m\x1b[95m\x1b[1m\x1b[48;5;22mfn\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[94m\x1b[1m\x1b[48;5;22m{}\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m()\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m{{\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[95m\x1b[1m\x1b[48;5;22mlet\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m{}\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m=\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22ma\x1b[0m\x1b[39m {} ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22mb;\x1b[0m\x1b[39m ",
-            "\x1b[0m\x1b[39m\x1b[1m\x1b[48;5;22m}}\x1b[0m\n"
+            "~    1 | \x1b[0m\x1b[38;5;90m\x1b[48;5;194mfn\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;25m\x1b[48;5;194m{}\x1b[0m\x1b[38;5;235m\x1b[48;5;194m()\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194m{{\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;90m\x1b[48;5;194mlet\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194m{}\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194m=\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194ma\x1b[0m\x1b[39m {} ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194mb;\x1b[0m\x1b[39m ",
+            "\x1b[0m\x1b[38;5;235m\x1b[48;5;194m}}\x1b[0m\n"
         ), name, identifier, operator)
     }
 
@@ -229,9 +230,19 @@ mod tests {
         assert!(plain.contains("=    1 | let α = 1;"));
         assert!(!plain.contains('\x1b'));
         let colored = render_text(text, 0, 1, ranges, &spans, Palette::Color);
-        assert!(colored.contains("\x1b[95m"));
+        assert!(colored.contains("\x1b[38;5;90m"));
         assert!(colored.contains(MATCHED));
         assert!(colored.contains('α'));
+    }
+
+    #[test]
+    fn pale_overlay_keeps_syntax() {
+        let range = 0..2;
+        let spans = [syntax::Span { bytes: range.clone(), color: "\x1b[95m" }];
+        let output = render_text("fn", 0, 1, std::slice::from_ref(&range), &spans, Palette::Color);
+        assert!(output.contains("\x1b[48;5;194m"));
+        assert!(output.contains("\x1b[38;5;90m"));
+        assert!(!output.contains("\x1b[1m"));
     }
 
     #[test]

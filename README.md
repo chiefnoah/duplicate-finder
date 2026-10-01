@@ -121,8 +121,8 @@ df ./my-project --show-similarities
 ```
 
 The view compares the first fragment with each remaining fragment in a group.
-A green background and bold text mark matched tokens.
-Syntax foreground colors remain visible underneath.
+A pale green background marks matched tokens without bold text.
+Darker foreground colors preserve the syntax hues on the pale background.
 Normalized identifiers and literal values can match despite different text.
 The view uses the parsed source snapshot, not a later file read.
 Display alignment uses linear memory and runs only when the flag is present.

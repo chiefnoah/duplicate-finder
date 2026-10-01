@@ -10,6 +10,13 @@ const NUMBER: &str = "\x1b[96m";
 const FUNCTION: &str = "\x1b[94m";
 const TYPE: &str = "\x1b[92m";
 const VARIABLE: &str = "\x1b[97m";
+const OVERLAY_DEFAULT: &str = "\x1b[38;5;235m";
+const OVERLAY_COMMENT: &str = "\x1b[38;5;240m";
+const OVERLAY_KEYWORD: &str = "\x1b[38;5;90m";
+const OVERLAY_STRING: &str = "\x1b[38;5;58m";
+const OVERLAY_NUMBER: &str = "\x1b[38;5;23m";
+const OVERLAY_FUNCTION: &str = "\x1b[38;5;25m";
+const OVERLAY_TYPE: &str = "\x1b[38;5;22m";
 const THEME: [(&str, &str); 12] = [
     ("attribute", NUMBER),
     ("comment", COMMENT),
@@ -28,6 +35,19 @@ const THEME: [(&str, &str); 12] = [
 pub struct Span {
     pub bytes: Range<usize>,
     pub color: &'static str,
+}
+
+// Darker foregrounds retain syntax hues on the pale similarity background.
+pub fn overlay_color(color: &'static str) -> &'static str {
+    match color {
+        COMMENT => OVERLAY_COMMENT,
+        KEYWORD => OVERLAY_KEYWORD,
+        STRING => OVERLAY_STRING,
+        NUMBER => OVERLAY_NUMBER,
+        FUNCTION => OVERLAY_FUNCTION,
+        TYPE => OVERLAY_TYPE,
+        _ => OVERLAY_DEFAULT,
+    }
 }
 
 // Isolate grammar queries and highlight events from the report service.

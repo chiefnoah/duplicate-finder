@@ -52,8 +52,8 @@ fn explicit_color_override() {
     let auto = report(directory.path(), &["--show-similarities"]);
     assert!(!auto.contains('\x1b'));
     let color = report(directory.path(), &["--show-similarities", "--color=always"]);
-    assert!(color.contains("\x1b[95m"));
-    assert!(color.contains("\x1b[48;5;22m"));
+    assert!(color.contains("\x1b[38;5;90m"));
+    assert!(color.contains("\x1b[48;5;194m"));
     assert!(color.contains('α') && color.contains('β'));
 }
 
