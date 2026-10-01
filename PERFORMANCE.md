@@ -45,3 +45,7 @@ Criterion stores full measurements under `target/criterion`.
 | Task | Focused case | Before | After |
 |---|---|---:|---:|
 | `tsk-12`: skip same-hash buckets | Near detection, exact corpus, 128 files, 1 thread | 3.482 ms | 10.825 µs |
+| `tsk-13`: borrow node-kind strings | Sequence extraction, 512 statements | 383.920 µs | 300.860 µs |
+
+The pale-overlay change preceded `tsk-13`.
+Later color-output comparisons must use the pale-overlay version as their baseline.

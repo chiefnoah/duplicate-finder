@@ -5,9 +5,11 @@ use crate::clones::CloneGroup;
 use crate::hasher::Fragment;
 
 const FULL_SIMILARITY: f64 = 1.0;
+const IDENTIFIER_KIND: &str = "ID";
+const LITERAL_KIND: &str = "LIT";
 
 struct Token {
-    kind: String,
+    kind: &'static str,
     bytes: std::ops::Range<usize>,
 }
 
@@ -42,7 +44,7 @@ fn display_tokens(node: tree_sitter::Node, tokens: &mut Vec<Token>) {
     let embedded = node
         .children(&mut cursor)
         .any(|child| matches!(child.kind(), "template_substitution" | "interpolation"));
-    if node.child_count() == 0 || kind == "ID" || (kind == "LIT" && !embedded) {
+    if node.child_count() == 0 || kind == IDENTIFIER_KIND || (kind == LITERAL_KIND && !embedded) {
         if !node.byte_range().is_empty() {
             tokens.push(Token {
                 kind,
@@ -147,7 +149,7 @@ fn token_row(a: &[Token], b: &[Token], direction: Direction) -> Vec<usize> {
 /// Compute structural similarity between two AST fragments.
 /// Uses a normalised node-kind sequence comparison (LCS-based).
 /// Returns a value in [0.0, 1.0].
-pub fn tree_similarity(a: &[String], b: &[String]) -> f64 {
+pub fn tree_similarity<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
     if a.is_empty() && b.is_empty() {
         return FULL_SIMILARITY;
     }
@@ -161,7 +163,7 @@ pub fn tree_similarity(a: &[String], b: &[String]) -> f64 {
 }
 
 /// Longest common subsequence length (standard DP).
-fn lcs_length(a: &[String], b: &[String]) -> usize {
+fn lcs_length<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     // Shared ends always belong to an optimal LCS; compare only the different middle.
     let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
     let a = &a[prefix..];
@@ -206,7 +208,7 @@ fn lcs_length(a: &[String], b: &[String]) -> usize {
 pub fn extract_kind_sequence(
     node: tree_sitter::Node,
     source: &[u8],
-) -> Vec<String> {
+) -> Vec<&'static str> {
     let mut seq = Vec::new();
     extract_kind_sequence_recursive(node, source, &mut seq);
     seq
@@ -215,7 +217,7 @@ pub fn extract_kind_sequence(
 fn extract_kind_sequence_recursive(
     node: tree_sitter::Node,
     source: &[u8],
-    seq: &mut Vec<String>,
+    seq: &mut Vec<&'static str>,
 ) {
     let kind = normalise_kind(node.kind());
     seq.push(kind);
@@ -231,15 +233,15 @@ fn extract_kind_sequence_recursive(
     }
 }
 
-fn normalise_kind(kind: &str) -> String {
+fn normalise_kind(kind: &'static str) -> &'static str {
     match kind {
         "identifier" | "field_identifier" | "type_identifier"
-        | "shorthand_field_identifier" | "property_identifier" => "ID".to_string(),
+        | "shorthand_field_identifier" | "property_identifier" => IDENTIFIER_KIND,
         "integer_literal" | "float_literal" | "string_literal" | "string"
         | "raw_string_literal" | "char_literal" | "boolean_literal" | "true"
         | "false" | "none" | "null" | "number" | "template_string"
-        | "interpreted_string_literal" | "rune_literal" => "LIT".to_string(),
-        other => other.to_string(),
+        | "interpreted_string_literal" | "rune_literal" => LITERAL_KIND,
+        other => other,
     }
 }
 
@@ -276,7 +278,7 @@ pub fn find_near_duplicates(
         // Same-hash pairs cannot form near groups, so avoid their AST traversals.
         .filter(|bucket| bucket.iter().any(|fragment| fragment.hash != bucket[0].hash))
         .flat_map_iter(|bucket| {
-            let sequences: Vec<Option<Vec<String>>> = bucket
+            let sequences: Vec<Option<Vec<&str>>> = bucket
                 .par_iter()
                 .map(|frag| {
                     let (tree, source) = trees.get(&frag.file)?;
@@ -299,7 +301,7 @@ pub fn find_near_duplicates(
 
 fn group_bucket(
     bucket: &[&Fragment],
-    sequences: &[Option<Vec<String>>],
+    sequences: &[Option<Vec<&str>>],
     threshold: f64,
 ) -> Vec<CloneGroup> {
     let mut groups = Vec::new();
@@ -365,7 +367,7 @@ fn group_bucket(
     groups
 }
 
-fn matches(a: &[String], b: &[String], threshold: f64) -> bool {
+fn matches<T: PartialEq>(a: &[T], b: &[T], threshold: f64) -> bool {
     // LCS cannot exceed the smaller sequence length.
     if !can_match(a.len(), b.len(), threshold) {
         return false;
@@ -425,8 +427,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn borrowed_kinds_match_owned() {
+        for (extension, source) in [
+            ("rs", "fn f() { let x = 1; }"),
+            ("py", "def f():\n    return f'{a + b}'\n"),
+            ("js", "function f() { return `${a + b}`; }"),
+            ("tsx", "function f() { return <div/>; }"),
+            ("go", "package main\nfunc f() {}"),
+            ("java", "class A { int f() { return 1; } }"),
+            ("c", "int f() { return 1; }"),
+            ("cpp", "int f() { return 1; }"),
+            ("kt", "fun f() { return 1 }"),
+            ("scala", "object A { def f(): Int = 1 }"),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&crate::parser::language_for_extension(extension).unwrap()).unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let mut expected = Vec::new();
+            owned_sequence(tree.root_node(), &mut expected);
+            assert_eq!(extract_kind_sequence(tree.root_node(), source.as_bytes()), expected, "{extension}");
+        }
+    }
+
+    // Preserve the former owned-string normalization independently of the hot path.
+    fn owned_sequence(node: tree_sitter::Node, sequence: &mut Vec<String>) {
+        let kind = match node.kind() {
+            "identifier" | "field_identifier" | "type_identifier"
+            | "shorthand_field_identifier" | "property_identifier" => "ID",
+            "integer_literal" | "float_literal" | "string_literal" | "string"
+            | "raw_string_literal" | "char_literal" | "boolean_literal" | "true"
+            | "false" | "none" | "null" | "number" | "template_string"
+            | "interpreted_string_literal" | "rune_literal" => "LIT",
+            other => other,
+        };
+        sequence.push(kind.to_owned());
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            owned_sequence(child, sequence);
+        }
+    }
+
+    #[test]
     fn display_alignment_matches_lcs() {
-        let sequences: Vec<Vec<String>> = (0..=5)
+        let sequences: Vec<Vec<&str>> = (0..=5)
             .flat_map(|length| {
                 (0..(1 << length)).map(move |bits| {
                     (0..length)
@@ -443,12 +486,12 @@ mod tests {
             .collect();
         for a in &sequences {
             for b in &sequences {
-                let tokens = |sequence: &[String]| {
+                let tokens = |sequence: &[&'static str]| {
                     sequence
                         .iter()
                         .enumerate()
                         .map(|(index, kind)| Token {
-                            kind: kind.clone(),
+                            kind: *kind,
                             bytes: index..index + 1,
                         })
                         .collect::<Vec<_>>()
@@ -565,7 +608,7 @@ mod tests {
     }
 
     // Use a full DP table as an independent reference for optimized comparisons.
-    fn reference_lcs(a: &[String], b: &[String]) -> usize {
+    fn reference_lcs<T: PartialEq>(a: &[T], b: &[T]) -> usize {
         let mut table = vec![vec![0; b.len() + 1]; a.len() + 1];
         for i in 1..=a.len() {
             for j in 1..=b.len() {
@@ -579,7 +622,7 @@ mod tests {
         table[a.len()][b.len()]
     }
 
-    fn reference_similarity(a: &[String], b: &[String]) -> f64 {
+    fn reference_similarity<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
         let largest = a.len().max(b.len());
         if largest == 0 {
             return 1.0;
@@ -642,7 +685,7 @@ mod tests {
         let mut fragments: Vec<_> = (0..2).map(fixture_fragment).collect();
         fragments[1].node_count = 14;
         let bucket: Vec<_> = fragments.iter().collect();
-        let sequences = vec![Some(vec!["ID".to_string(); 20]); fragments.len()];
+        let sequences = vec![Some(vec!["ID"; 20]); fragments.len()];
 
         let groups = group_bucket(&bucket, &sequences, 1.0);
         assert_eq!(groups.len(), 1);
@@ -652,7 +695,7 @@ mod tests {
 
     fn serial_groups(
         bucket: &[&Fragment],
-        sequences: &[Option<Vec<String>>],
+        sequences: &[Option<Vec<&str>>],
         threshold: f64,
     ) -> Vec<CloneGroup> {
         let mut groups = Vec::new();
@@ -734,7 +777,7 @@ mod tests {
                 }
                 Some(
                     (0..(i % 19))
-                        .map(|j| format!("{}", (i >> (j % 6)) % 3))
+                        .map(|j| ["0", "1", "2"][(i >> (j % 6)) % 3])
                         .collect(),
                 )
             })
@@ -764,7 +807,7 @@ mod tests {
             ["a", "b", "e", "e"],
         ]
         .into_iter()
-        .map(|seq| Some(seq.into_iter().map(String::from).collect()))
+        .map(|seq| Some(seq.into_iter().collect()))
         .collect();
 
         let groups = group_bucket(&bucket, &sequences, 0.75);
@@ -825,15 +868,15 @@ mod tests {
 
     #[test]
     fn test_tree_similarity_identical() {
-        let a = vec!["fn".into(), "ID".into(), "block".into()];
-        let b = vec!["fn".into(), "ID".into(), "block".into()];
+        let a = vec!["fn", "ID", "block"];
+        let b = vec!["fn", "ID", "block"];
         assert_eq!(tree_similarity(&a, &b), 1.0);
     }
 
     #[test]
     fn test_tree_similarity_completely_different() {
-        let a = vec!["fn".into(), "ID".into()];
-        let b = vec!["class".into(), "block".into()];
+        let a = vec!["fn", "ID"];
+        let b = vec!["class", "block"];
         assert_eq!(tree_similarity(&a, &b), 0.0);
     }
 
