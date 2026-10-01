@@ -21,6 +21,7 @@ pub struct Renderer<'a> {
     styles: HashMap<PathBuf, Vec<syntax::Span>>,
     palette: Palette,
     reference: Option<similarity::Reference>,
+    syntax: syntax::Cache,
 }
 
 impl<'a> Renderer<'a> {
@@ -30,6 +31,7 @@ impl<'a> Renderer<'a> {
             styles: HashMap::new(),
             palette,
             reference: None,
+            syntax: syntax::Cache::default(),
         }
     }
 
@@ -87,10 +89,12 @@ impl<'a> Renderer<'a> {
                         .extension()
                         .and_then(|value| value.to_str())
                         .unwrap_or("");
-                    syntax::spans(source, extension).unwrap_or_else(|error| {
-                        eprintln!("warning: syntax colors unavailable: {error}");
-                        Vec::new()
-                    })
+                    self.syntax
+                        .spans(source, extension)
+                        .unwrap_or_else(|error| {
+                            eprintln!("warning: syntax colors unavailable: {error}");
+                            Vec::new()
+                        })
                 })
                 .as_slice()
         } else {

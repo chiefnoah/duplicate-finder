@@ -639,6 +639,17 @@ fn bench_assessment(c: &mut Criterion) {
         c.bench_function(&format!("syntax_reuse/{extension}"), |b| {
             b.iter(|| cached_syntax(&mut highlighter, &config, black_box(&source)));
         });
+        let mut cache = syntax::Cache::default();
+        let actual: Vec<_> = cache
+            .spans(&source, extension)
+            .unwrap()
+            .into_iter()
+            .map(|span| (span.bytes, span.color))
+            .collect();
+        assert_eq!(actual, expected);
+        c.bench_function(&format!("syntax_cached/{extension}"), |b| {
+            b.iter(|| cache.spans(black_box(&source), extension).unwrap());
+        });
     }
 }
 
