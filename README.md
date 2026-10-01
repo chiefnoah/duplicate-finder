@@ -68,12 +68,15 @@ inputs.git-hooks.lib.${system}.run {
   hooks = import ./nix/git-hooks.nix {
     inherit (pkgs) lib;
     package = self.packages.${system}.df;
+    threshold = 0.6;
+    minNodes = 15;
   };
 }
 ```
 
 The hook scans the repository and fails when it finds clone groups.
-It uses `--fail-on-clones`; normal `df` runs still exit successfully.
+Set `threshold` and `minNodes` to configure the hook.
+Their defaults are `0.8` and `5`. Normal `df` runs still exit successfully.
 
 ## Usage
 
