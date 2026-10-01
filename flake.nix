@@ -42,6 +42,7 @@
         {
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
+            package = pkgs.prek;
             hooks = {
               rustfmt.enable = true;
             } // import ./nix/git-hooks.nix {
