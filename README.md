@@ -10,6 +10,11 @@ A command-line tool that detects code clones across codebases using AST-based st
 4. **Near-duplicate matching** -- remaining fragments are compared pairwise using an LCS-based similarity metric over their node-kind sequences (Type 3 detection).
 5. **Subsumption** -- smaller clones contained within larger ones are removed to keep results actionable.
 
+Fragment extraction computes each node's normalized hash and subtree count once.
+It retains metadata only for meaningful roots and preserves preorder.
+Near-duplicate detection rejects pairs whose sequence-length ratio cannot meet the threshold.
+It still uses LCS for the remaining pairs.
+
 ## Supported languages
 
 | Language   | Extensions             |

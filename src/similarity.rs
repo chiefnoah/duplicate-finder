@@ -180,6 +180,11 @@ fn group_bucket(
                     return false;
                 };
 
+                // Use actual sequence counts: line lookup can select a larger AST node.
+                if !can_match(seq_i.len(), seq_j.len(), threshold) {
+                    return false;
+                }
+
                 tree_similarity(seq_i, seq_j) >= threshold
             })
             .collect();
@@ -217,6 +222,17 @@ fn group_bucket(
     }
 
     groups
+}
+
+fn can_match(a: usize, b: usize, threshold: f64) -> bool {
+    let largest = a.max(b);
+    let bound = if largest == 0 {
+        1.0
+    } else {
+        a.min(b) as f64 / largest as f64
+    };
+
+    bound >= threshold
 }
 
 fn dedup_groups(groups: &mut Vec<CloneGroup>) {
@@ -269,6 +285,45 @@ fn find_node_at_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_bound_keeps_matches() {
+        for a in 0..8 {
+            for b in 0..8 {
+                let seq_a = vec!["ID".to_string(); a];
+                let seq_b = vec!["ID".to_string(); b];
+                let similarity = tree_similarity(&seq_a, &seq_b);
+                for threshold in [
+                    -1.0,
+                    0.0,
+                    0.5,
+                    1.0,
+                    2.0,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    f64::NAN,
+                    similarity,
+                    similarity - f64::EPSILON,
+                    similarity + f64::EPSILON,
+                ] {
+                    assert_eq!(can_match(a, b, threshold), similarity >= threshold);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bound_uses_sequence_counts() {
+        let mut fragments: Vec<_> = (0..2).map(fixture_fragment).collect();
+        fragments[1].node_count = 14;
+        let bucket: Vec<_> = fragments.iter().collect();
+        let sequences = vec![Some(vec!["ID".to_string(); 20]); fragments.len()];
+
+        let groups = group_bucket(&bucket, &sequences, 1.0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].fragments.len(), 2);
+        assert_eq!(groups[0].similarity, 1.0);
+    }
 
     fn serial_groups(
         bucket: &[&Fragment],
@@ -345,7 +400,11 @@ mod tests {
                 if i % 11 == 0 {
                     return None;
                 }
-                Some((0..12).map(|j| format!("{}", (i >> (j % 6)) % 3)).collect())
+                Some(
+                    (0..(i % 19))
+                        .map(|j| format!("{}", (i >> (j % 6)) % 3))
+                        .collect(),
+                )
             })
             .collect();
 

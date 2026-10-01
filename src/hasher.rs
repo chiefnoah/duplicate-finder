@@ -15,6 +15,12 @@ pub struct Fragment {
     pub kind: String,
 }
 
+#[derive(Clone, Copy, Default)]
+struct Subtree {
+    hash: u64,
+    node_count: usize,
+}
+
 /// Meaningful root node kinds — we only hash subtrees rooted at these.
 /// This keeps the output actionable and avoids hashing every tiny expression.
 fn is_meaningful_root(kind: &str) -> bool {
@@ -92,7 +98,9 @@ fn is_literal(kind: &str) -> bool {
     )
 }
 
+// Retain the former count and hash traversals as test-only output oracles.
 /// Count nodes in a subtree.
+#[cfg(test)]
 fn count_nodes(node: Node) -> usize {
     let mut count = 1;
     let mut cursor = node.walk();
@@ -110,6 +118,7 @@ fn count_nodes(node: Node) -> usize {
 /// Compute a normalised structural hash for a subtree.
 /// Identifiers are replaced with "ID", literals with "LIT".
 /// The hash is a Merkle hash: hash(kind, child_hashes...).
+#[cfg(test)]
 fn structural_hash(node: Node, source: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
 
@@ -154,50 +163,74 @@ pub fn collect_fragments(
     file: &Path,
     min_nodes: usize,
 ) -> Vec<Fragment> {
-    let mut fragments = Vec::new();
-    let source_bytes = source.as_bytes();
-    collect_fragments_recursive(
-        tree.root_node(),
-        source_bytes,
-        file,
-        min_nodes,
-        &mut fragments,
-    );
-    fragments
+    let mut subtrees = Vec::new();
+    collect_subtrees(tree.root_node(), source.as_bytes(), &mut subtrees);
+
+    // Cached counts filter candidates before fragment allocation.
+    subtrees
+        .into_iter()
+        .filter(|(_, subtree)| subtree.node_count >= min_nodes)
+        .map(|(node, subtree)| Fragment {
+            file: file.to_path_buf(),
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
+            node_count: subtree.node_count,
+            hash: subtree.hash,
+            kind: node.kind().to_string(),
+        })
+        .collect()
 }
 
-fn collect_fragments_recursive(
-    node: Node,
+fn collect_subtrees<'tree>(
+    node: Node<'tree>,
     source: &[u8],
-    file: &Path,
-    min_nodes: usize,
-    fragments: &mut Vec<Fragment>,
-) {
-    if is_meaningful_root(node.kind()) {
-        let node_count = count_nodes(node);
-        if node_count >= min_nodes {
-            let hash = structural_hash(node, source);
-            fragments.push(Fragment {
-                file: file.to_path_buf(),
-                start_line: node.start_position().row + 1,
-                end_line: node.end_position().row + 1,
-                node_count,
-                hash,
-                kind: node.kind().to_string(),
-            });
+    subtrees: &mut Vec<(Node<'tree>, Subtree)>,
+) -> Subtree {
+    // Reserve preorder slots; fill metadata after the children to preserve group order.
+    let slot = if is_meaningful_root(node.kind()) {
+        let index = subtrees.len();
+        subtrees.push((node, Subtree::default()));
+        Some(index)
+    } else {
+        None
+    };
+
+    let mut hasher = DefaultHasher::new();
+    let normalized = if is_identifier(node.kind()) {
+        "ID".hash(&mut hasher);
+        true
+    } else if is_literal(node.kind()) {
+        "LIT".hash(&mut hasher);
+        true
+    } else {
+        node.kind().hash(&mut hasher);
+        false
+    };
+
+    if !normalized && node.child_count() == 0 {
+        source[node.byte_range()].hash(&mut hasher);
+    }
+
+    // Fold child metadata once. Normalized literals still count all descendants.
+    let mut node_count = 1;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let subtree = collect_subtrees(child, source, subtrees);
+        node_count += subtree.node_count;
+        if !normalized {
+            subtree.hash.hash(&mut hasher);
         }
     }
 
-    // Always recurse into children to find nested meaningful nodes.
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            collect_fragments_recursive(cursor.node(), source, file, min_nodes, fragments);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    let subtree = Subtree {
+        hash: hasher.finish(),
+        node_count,
+    };
+    if let Some(index) = slot {
+        subtrees[index].1 = subtree;
     }
+
+    subtree
 }
 
 #[cfg(test)]
@@ -205,6 +238,76 @@ mod tests {
     use super::*;
     use crate::parser;
     use std::fs;
+
+    // Preserve the original preorder traversal as an independent output oracle.
+    fn reference_fragments(
+        node: Node,
+        source: &[u8],
+        file: &Path,
+        min_nodes: usize,
+        fragments: &mut Vec<Fragment>,
+    ) {
+        let node_count = count_nodes(node);
+        if is_meaningful_root(node.kind()) && node_count >= min_nodes {
+            fragments.push(Fragment {
+                file: file.to_path_buf(),
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                node_count,
+                hash: structural_hash(node, source),
+                kind: node.kind().into(),
+            });
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            reference_fragments(child, source, file, min_nodes, fragments);
+        }
+    }
+
+    #[test]
+    fn fragments_match_reference() {
+        let sources = [
+            ("rs", "fn outer() { let s = r#\"hello\"#; if true { fn inner() {} } }"),
+            ("py", "def outer():\n    def inner():\n        return 'hello'\n    if True:\n        return inner()\n"),
+            ("js", "function f() { return `${(() => { return a + 1; })()}`; }"),
+            ("ts", "class A { f(x: number) { if (x > 0) { return x; } return 0; } }"),
+            ("go", "package main\nfunc f(x int) int { if x > 0 { return x }; return 0 }"),
+            ("java", "class A { int f(int x) { if (x > 0) { return x; } return 0; } }"),
+            ("c", "int f(int x) { if (x > 0) { return x; } return 0; }"),
+            ("cpp", "class A { public: int f(int x) { if (x > 0) { return x; } return 0; } };"),
+            ("kt", "fun f(x: Int): Int { if (x > 0) { return x }; return 0 }"),
+            ("scala", "object A { def f(x: Int): Int = { if (x > 0) { x } else { 0 } } }"),
+            ("rs", "fn broken() { let x = ; if true {"),
+        ];
+
+        for (extension, source) in sources {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&parser::language_for_extension(extension).unwrap())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let file = PathBuf::from(format!("fixture.{extension}"));
+            let total = count_nodes(tree.root_node());
+
+            for min_nodes in [0, 1, 5, total, total + 1] {
+                let mut expected = Vec::new();
+                reference_fragments(
+                    tree.root_node(),
+                    source.as_bytes(),
+                    &file,
+                    min_nodes,
+                    &mut expected,
+                );
+                let actual = collect_fragments(&tree, source, &file, min_nodes);
+                assert_eq!(
+                    format!("{actual:?}"),
+                    format!("{expected:?}"),
+                    "{extension}: {source}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_identical_functions_same_hash() {
