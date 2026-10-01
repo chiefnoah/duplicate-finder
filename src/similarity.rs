@@ -18,7 +18,56 @@ enum Direction {
     Reverse,
 }
 
+pub struct Reference {
+    fragment: Fragment,
+    tokens: Vec<Token>,
+}
+
+impl Reference {
+    pub fn new(
+        fragment: &Fragment,
+        trees: &HashMap<std::path::PathBuf, (tree_sitter::Tree, String)>,
+    ) -> Option<Self> {
+        let mut tokens = Vec::new();
+        display_tokens(
+            find_node_at(&trees.get(&fragment.file)?.0, fragment)?,
+            &mut tokens,
+        );
+        Some(Self {
+            fragment: fragment.clone(),
+            tokens,
+        })
+    }
+
+    pub fn is_fragment(&self, fragment: &Fragment) -> bool {
+        self.fragment.file == fragment.file
+            && self.fragment.bytes == fragment.bytes
+            && self.fragment.kind == fragment.kind
+    }
+
+    pub fn ranges(
+        &self,
+        member: &Fragment,
+        trees: &HashMap<std::path::PathBuf, (tree_sitter::Tree, String)>,
+    ) -> Option<Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>> {
+        let mut tokens = Vec::new();
+        display_tokens(
+            find_node_at(&trees.get(&member.file)?.0, member)?,
+            &mut tokens,
+        );
+        let mut pairs = Vec::new();
+        align_tokens(&self.tokens, &tokens, 0, 0, &mut pairs);
+        Some(
+            pairs
+                .into_iter()
+                .map(|(i, j)| (self.tokens[i].bytes.clone(), tokens[j].bytes.clone()))
+                .collect(),
+        )
+    }
+}
+
 // Align leaf tokens for display. Detection still uses the full AST sequence.
+#[cfg(test)]
 pub fn matched_ranges(
     left: &Fragment,
     right: &Fragment,
@@ -204,10 +253,7 @@ fn lcs_length<T: PartialEq>(a: &[T], b: &[T]) -> usize {
 
 /// Extract a pre-order sequence of normalised node kinds from an AST subtree.
 /// This is used as the "fingerprint" for similarity comparison.
-pub fn extract_kind_sequence(
-    node: tree_sitter::Node,
-    source: &[u8],
-) -> Vec<&'static str> {
+pub fn extract_kind_sequence(node: tree_sitter::Node, source: &[u8]) -> Vec<&'static str> {
     let mut seq = Vec::new();
     extract_kind_sequence_recursive(node, source, &mut seq);
     seq
@@ -234,12 +280,26 @@ fn extract_kind_sequence_recursive(
 
 fn normalise_kind(kind: &'static str) -> &'static str {
     match kind {
-        "identifier" | "field_identifier" | "type_identifier"
-        | "shorthand_field_identifier" | "property_identifier" => IDENTIFIER_KIND,
-        "integer_literal" | "float_literal" | "string_literal" | "string"
-        | "raw_string_literal" | "char_literal" | "boolean_literal" | "true"
-        | "false" | "none" | "null" | "number" | "template_string"
-        | "interpreted_string_literal" | "rune_literal" => LITERAL_KIND,
+        "identifier"
+        | "field_identifier"
+        | "type_identifier"
+        | "shorthand_field_identifier"
+        | "property_identifier" => IDENTIFIER_KIND,
+        "integer_literal"
+        | "float_literal"
+        | "string_literal"
+        | "string"
+        | "raw_string_literal"
+        | "char_literal"
+        | "boolean_literal"
+        | "true"
+        | "false"
+        | "none"
+        | "null"
+        | "number"
+        | "template_string"
+        | "interpreted_string_literal"
+        | "rune_literal" => LITERAL_KIND,
         other => other,
     }
 }
@@ -275,7 +335,11 @@ pub fn find_near_duplicates(
     let mut groups: Vec<CloneGroup> = buckets
         .par_iter()
         // Same-hash pairs cannot form near groups, so avoid their AST traversals.
-        .filter(|bucket| bucket.iter().any(|fragment| fragment.hash != bucket[0].hash))
+        .filter(|bucket| {
+            bucket
+                .iter()
+                .any(|fragment| fragment.hash != bucket[0].hash)
+        })
         .flat_map_iter(|bucket| {
             let sequences: Vec<Option<Vec<&str>>> = bucket
                 .par_iter()
@@ -332,7 +396,11 @@ fn group_bucket(
         }
 
         // Reuse the accepted pair score; larger groups retain the threshold label.
-        let similarity = if matches.len() == 1 { matches[0].1 } else { threshold };
+        let similarity = if matches.len() == 1 {
+            matches[0].1
+        } else {
+            threshold
+        };
 
         // Commit matches in input order to preserve greedy, non-transitive groups.
         let mut group_frags = vec![(*bucket[i]).clone()];
@@ -432,23 +500,43 @@ mod tests {
             ("scala", "object A { def f(): Int = 1 }"),
         ] {
             let mut parser = tree_sitter::Parser::new();
-            parser.set_language(&crate::parser::language_for_extension(extension).unwrap()).unwrap();
+            parser
+                .set_language(&crate::parser::language_for_extension(extension).unwrap())
+                .unwrap();
             let tree = parser.parse(source, None).unwrap();
             let mut expected = Vec::new();
             owned_sequence(tree.root_node(), &mut expected);
-            assert_eq!(extract_kind_sequence(tree.root_node(), source.as_bytes()), expected, "{extension}");
+            assert_eq!(
+                extract_kind_sequence(tree.root_node(), source.as_bytes()),
+                expected,
+                "{extension}"
+            );
         }
     }
 
     // Preserve the former owned-string normalization independently of the hot path.
     fn owned_sequence(node: tree_sitter::Node, sequence: &mut Vec<String>) {
         let kind = match node.kind() {
-            "identifier" | "field_identifier" | "type_identifier"
-            | "shorthand_field_identifier" | "property_identifier" => "ID",
-            "integer_literal" | "float_literal" | "string_literal" | "string"
-            | "raw_string_literal" | "char_literal" | "boolean_literal" | "true"
-            | "false" | "none" | "null" | "number" | "template_string"
-            | "interpreted_string_literal" | "rune_literal" => "LIT",
+            "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "shorthand_field_identifier"
+            | "property_identifier" => "ID",
+            "integer_literal"
+            | "float_literal"
+            | "string_literal"
+            | "string"
+            | "raw_string_literal"
+            | "char_literal"
+            | "boolean_literal"
+            | "true"
+            | "false"
+            | "none"
+            | "null"
+            | "number"
+            | "template_string"
+            | "interpreted_string_literal"
+            | "rune_literal" => "LIT",
             other => other,
         };
         sequence.push(kind.to_owned());
@@ -466,9 +554,9 @@ mod tests {
                     (0..length)
                         .map(|index| {
                             if (bits >> index) & 1 == 0 {
-                                "a".into()
+                                "a"
                             } else {
-                                "b".into()
+                                "b"
                             }
                         })
                         .collect()
@@ -482,7 +570,7 @@ mod tests {
                         .iter()
                         .enumerate()
                         .map(|(index, kind)| Token {
-                            kind: *kind,
+                            kind,
                             bytes: index..index + 1,
                         })
                         .collect::<Vec<_>>()
@@ -517,6 +605,10 @@ mod tests {
         assert!(pairs
             .iter()
             .any(|(left, right)| &a[left.clone()] == "α" && &b[right.clone()] == "β"));
+        let reference = Reference::new(functions[0], &trees).unwrap();
+        assert_eq!(reference.ranges(functions[1], &trees).unwrap(), pairs);
+        assert!(reference.is_fragment(functions[0]));
+        assert!(!reference.is_fragment(functions[1]));
     }
 
     fn near_fixture(
@@ -640,7 +732,10 @@ mod tests {
                 assert_eq!(tree_similarity(a, b), expected);
                 for threshold in [0.0, 0.5, 0.8, 1.0, 2.0, f64::NAN, expected] {
                     assert_eq!(matches(a, b, threshold), expected >= threshold);
-                    assert_eq!(match_score(a, b, threshold), (expected >= threshold).then_some(expected));
+                    assert_eq!(
+                        match_score(a, b, threshold),
+                        (expected >= threshold).then_some(expected)
+                    );
                 }
             }
         }
@@ -676,8 +771,12 @@ mod tests {
     fn asymmetric_lcs_matches() {
         let kinds = ["a", "b", "c", "d", "e"];
         for lengths in [(0, 257), (1, 257), (17, 257), (257, 17)] {
-            let a: Vec<_> = (0..lengths.0).map(|index| kinds[index % kinds.len()]).collect();
-            let b: Vec<_> = (0..lengths.1).map(|index| kinds[(index + 1) % kinds.len()]).collect();
+            let a: Vec<_> = (0..lengths.0)
+                .map(|index| kinds[index % kinds.len()])
+                .collect();
+            let b: Vec<_> = (0..lengths.1)
+                .map(|index| kinds[(index + 1) % kinds.len()])
+                .collect();
             assert_eq!(lcs_length(&a, &b), reference_lcs(&a, &b));
             assert_eq!(tree_similarity(&a, &b), reference_similarity(&a, &b));
         }

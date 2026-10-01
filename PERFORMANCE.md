@@ -14,7 +14,7 @@ The benchmark suite includes focused pair and source-output cases.
 - Threshold: `0.8` for exact and near corpora, `1.0` for sparse corpora.
 - Source output: 2 or 32 members, with 2,048 padding functions per file and warm syntax caches.
 
-Run the baseline:
+At commit `fbc4590`, run the baseline:
 
 ```sh
 nix develop path:. --command cargo bench --bench analysis -- \
@@ -42,6 +42,8 @@ Criterion stores full measurements under `target/criterion`.
 
 ## Individual changes
 
+Focused comparisons after `tsk-13` use 20 samples, a 0.2-second warmup, and a 0.5-second measurement target.
+
 | Task | Focused case | Before | After |
 |---|---|---:|---:|
 | `tsk-12`: skip same-hash buckets | Near detection, exact corpus, 128 files, 1 thread | 3.482 ms | 10.825 µs |
@@ -50,6 +52,8 @@ Criterion stores full measurements under `target/criterion`.
 | `tsk-15`: shorter rows without clearing | Shifted LCS, 512 tokens | 716.350 µs | 695.520 µs |
 | `tsk-15`: shorter rows without clearing | Asymmetric LCS, 128 then 512 tokens | 183.800 µs | 178.040 µs |
 | `tsk-16`: seek syntax spans | Color source output, 32 members | 2.073 ms | 1.387 ms |
+| `tsk-17`: reuse reference tokens | Plain source output, 32 members | 1.267 ms | 707.660 µs |
+| `tsk-17`: reuse reference tokens | Color source output, 32 members | 1.418 ms | 778.380 µs |
 
 The single-row LCS experiment passed equivalence tests but increased several kernel times by 4–9%.
 The retained implementation uses two rows and omits redundant clearing.
@@ -60,3 +64,27 @@ This change removes duplicate LCS work, but this local-edit fixture shows no cle
 
 The pale-overlay change preceded `tsk-13`.
 Later color-output comparisons must use the pale-overlay version as their baseline.
+
+The reference-token cache holds only the current group reference.
+The display benchmark resets this cache for each measured group.
+Its syntax caches remain warm, as in the earlier measurements.
+
+## Combined detection results
+
+The final run uses the same short measurement settings as the corrected baseline.
+All cases use 128 files.
+
+| Case | Threads | Corrected baseline | Final estimate |
+|---|---:|---:|---:|
+| Exact corpus pipeline | 1 | 11.100 ms | 7.652 ms |
+| Near corpus pipeline | 1 | 12.149 ms | 10.374 ms |
+| Sparse corpus pipeline | 1 | 12.060 ms | 11.109 ms |
+| Near corpus pipeline | 8 | 2.869 ms | 2.778 ms |
+| Near detection, near corpus | 1 | 4.443 ms | 3.469 ms |
+| Near detection, sparse corpus | 1 | 4.964 ms | 4.084 ms |
+
+The new asymmetric LCS cases use the separate `rows` baseline from before `tsk-15`.
+The combined run excludes those cases from comparisons with `corrected`.
+
+Validation: 60 tests and 116 benchmark smoke cases passed.
+Clippy reports the existing sort and recursive-parameter warnings.

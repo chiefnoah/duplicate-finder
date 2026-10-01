@@ -43,6 +43,7 @@ pub fn print_comparisons(
         let Some(reference) = group.fragments.first() else {
             continue;
         };
+        renderer.begin_group();
         for member in group.fragments.iter().skip(1) {
             println!("Similarity Group {}", index + 1);
             println!("{}", renderer.pair(reference, member)?);

@@ -20,6 +20,7 @@ pub struct Renderer<'a> {
     trees: &'a HashMap<PathBuf, (tree_sitter::Tree, String)>,
     styles: HashMap<PathBuf, Vec<syntax::Span>>,
     palette: Palette,
+    reference: Option<similarity::Reference>,
 }
 
 impl<'a> Renderer<'a> {
@@ -28,11 +29,31 @@ impl<'a> Renderer<'a> {
             trees,
             styles: HashMap::new(),
             palette,
+            reference: None,
         }
     }
 
+    // Bound token reuse to the current group; syntax caches remain per file.
+    pub fn begin_group(&mut self) {
+        self.reference = None;
+    }
+
     pub fn pair(&mut self, left: &Fragment, right: &Fragment) -> Result<String> {
-        let pairs = similarity::matched_ranges(left, right, self.trees)
+        if !self
+            .reference
+            .as_ref()
+            .is_some_and(|reference| reference.is_fragment(left))
+        {
+            self.reference = Some(
+                similarity::Reference::new(left, self.trees)
+                    .ok_or_else(|| anyhow!("Cannot align fragment source"))?,
+            );
+        }
+        let pairs = self
+            .reference
+            .as_ref()
+            .unwrap()
+            .ranges(right, self.trees)
             .ok_or_else(|| anyhow!("Cannot align fragment source"))?;
         let (a, b): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
         let mut result = format!(
@@ -120,7 +141,11 @@ fn render_text(
                 .filter(|span| span.bytes.contains(&position))
                 .map(|span| span.color)
                 .unwrap_or(DEFAULT);
-            let color = if similar { syntax::overlay_color(color) } else { color };
+            let color = if similar {
+                syntax::overlay_color(color)
+            } else {
+                color
+            };
             if !character.is_whitespace() {
                 if similar {
                     matched_count += 1;
@@ -170,25 +195,62 @@ mod tests {
     #[test]
     fn span_seek_preserves_output() {
         let spans = [
-            syntax::Span { bytes: 0..3, color: "\x1b[95m" },
-            syntax::Span { bytes: 4..8, color: "\x1b[94m" },
-            syntax::Span { bytes: 8..10, color: "\x1b[93m" },
-            syntax::Span { bytes: 11..12, color: DEFAULT },
-            syntax::Span { bytes: 13..15, color: "\x1b[97m" },
+            syntax::Span {
+                bytes: 0..3,
+                color: "\x1b[95m",
+            },
+            syntax::Span {
+                bytes: 4..8,
+                color: "\x1b[94m",
+            },
+            syntax::Span {
+                bytes: 8..10,
+                color: "\x1b[93m",
+            },
+            syntax::Span {
+                bytes: 11..12,
+                color: DEFAULT,
+            },
+            syntax::Span {
+                bytes: 13..15,
+                color: "\x1b[97m",
+            },
         ];
         for start in 0..17 {
             let matched = start..start + "α".len();
-            let skipped = spans.iter().take_while(|span| span.bytes.end <= start).count();
+            let skipped = spans
+                .iter()
+                .take_while(|span| span.bytes.end <= start)
+                .count();
             for palette in [Palette::Plain, Palette::Color] {
-                let expected = render_text("α + β", start, 42, std::slice::from_ref(&matched), &spans[skipped..], palette);
-                assert_eq!(render_text("α + β", start, 42, std::slice::from_ref(&matched), &spans, palette), expected);
+                let expected = render_text(
+                    "α + β",
+                    start,
+                    42,
+                    std::slice::from_ref(&matched),
+                    &spans[skipped..],
+                    palette,
+                );
+                assert_eq!(
+                    render_text(
+                        "α + β",
+                        start,
+                        42,
+                        std::slice::from_ref(&matched),
+                        &spans,
+                        palette
+                    ),
+                    expected
+                );
             }
         }
     }
 
     fn fixture() -> (Vec<Fragment>, HashMap<PathBuf, (tree_sitter::Tree, String)>) {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&crate::parser::language_for_extension("rs").unwrap()).unwrap();
+        parser
+            .set_language(&crate::parser::language_for_extension("rs").unwrap())
+            .unwrap();
         let mut fragments = Vec::new();
         let mut trees = HashMap::new();
         for (file, source) in [
@@ -199,7 +261,9 @@ mod tests {
             let tree = parser.parse(source, None).unwrap();
             let file = PathBuf::from(file);
             let fragment = crate::hasher::collect_fragments(&tree, source, &file, 5)
-                .into_iter().find(|fragment| fragment.kind == "function_item").unwrap();
+                .into_iter()
+                .find(|fragment| fragment.kind == "function_item")
+                .unwrap();
             fragments.push(fragment);
             trees.insert(file, (tree, source.into()));
         }
@@ -219,6 +283,36 @@ mod tests {
             };
             assert_eq!(result, expected);
             assert_eq!(result, renderer.pair(&fragments[0], &fragments[1]).unwrap());
+        }
+    }
+
+    #[test]
+    fn group_cache_preserves_pairs() {
+        let (fragments, trees) = fixture();
+        for palette in [Palette::Plain, Palette::Color] {
+            let mut renderer = Renderer::new(&trees, palette);
+            for (left, right) in [(0, 1), (0, 2), (2, 1), (1, 0)] {
+                let mut fresh = Renderer::new(&trees, palette);
+                assert_eq!(
+                    renderer.pair(&fragments[left], &fragments[right]).unwrap(),
+                    fresh.pair(&fragments[left], &fragments[right]).unwrap()
+                );
+            }
+            renderer.begin_group();
+            assert!(renderer.reference.is_none());
+            assert_eq!(
+                renderer.pair(&fragments[0], &fragments[1]).unwrap(),
+                Renderer::new(&trees, palette)
+                    .pair(&fragments[0], &fragments[1])
+                    .unwrap()
+            );
+
+            let mut invalid = fragments[0].clone();
+            invalid.bytes.start += 1;
+            assert!(renderer.pair(&invalid, &fragments[1]).is_err());
+            invalid = fragments[0].clone();
+            invalid.kind = "missing_kind".into();
+            assert!(renderer.pair(&invalid, &fragments[1]).is_err());
         }
     }
 
@@ -258,8 +352,18 @@ mod tests {
     #[test]
     fn pale_overlay_keeps_syntax() {
         let range = 0..2;
-        let spans = [syntax::Span { bytes: range.clone(), color: "\x1b[95m" }];
-        let output = render_text("fn", 0, 1, std::slice::from_ref(&range), &spans, Palette::Color);
+        let spans = [syntax::Span {
+            bytes: range.clone(),
+            color: "\x1b[95m",
+        }];
+        let output = render_text(
+            "fn",
+            0,
+            1,
+            std::slice::from_ref(&range),
+            &spans,
+            Palette::Color,
+        );
         assert!(output.contains("\x1b[48;5;194m"));
         assert!(output.contains("\x1b[38;5;90m"));
         assert!(!output.contains("\x1b[1m"));

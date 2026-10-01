@@ -12,6 +12,9 @@ use tree_sitter::Tree;
 #[path = "../src/clones.rs"]
 mod clones;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/comparison.rs"]
+mod comparison;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/hasher.rs"]
 mod hasher;
 #[allow(dead_code, unused_imports)]
@@ -20,9 +23,6 @@ mod parser;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/similarity.rs"]
 mod similarity;
-#[allow(dead_code, unused_imports)]
-#[path = "../src/comparison.rs"]
-mod comparison;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/syntax.rs"]
 mod syntax;
@@ -382,9 +382,16 @@ fn bench_kernels(c: &mut Criterion) {
 
     let mut asymmetric = c.benchmark_group("lcs_asymmetric");
     for length in SEQUENCE_LENGTHS {
-        let long: Vec<_> = (0..length).map(|index| format!("kind_{}", index % KIND_VARIANTS)).collect();
-        let short: Vec<_> = (0..length / 4).map(|index| format!("kind_{}", (index + 1) % KIND_VARIANTS)).collect();
-        for (name, a, b) in [("short_first", &short, &long), ("long_first", &long, &short)] {
+        let long: Vec<_> = (0..length)
+            .map(|index| format!("kind_{}", index % KIND_VARIANTS))
+            .collect();
+        let short: Vec<_> = (0..length / 4)
+            .map(|index| format!("kind_{}", (index + 1) % KIND_VARIANTS))
+            .collect();
+        for (name, a, b) in [
+            ("short_first", &short, &long),
+            ("long_first", &long, &short),
+        ] {
             asymmetric.bench_function(BenchmarkId::new(name, length), |bench| {
                 bench.iter(|| similarity::tree_similarity(black_box(a), black_box(b)));
             });
@@ -416,26 +423,39 @@ fn bench_kernels(c: &mut Criterion) {
 
 fn bench_focused(c: &mut Criterion) {
     let pair = Corpus::synthetic(Workload::Near, 2);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     c.bench_function("near_pair/t1", |b| {
         b.iter(|| pool.install(|| Stage::Near.run(&pair)));
     });
 
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&parser::language_for_extension("rs").unwrap()).unwrap();
+    parser
+        .set_language(&parser::language_for_extension("rs").unwrap())
+        .unwrap();
     let padding = "fn padding() { let x = 1; }\n".repeat(PADDING_FUNCTIONS);
     let mut trees = HashMap::new();
     let mut members = Vec::new();
     for index in 0..DISPLAY_MEMBERS[1] {
-        let source = format!("{padding}fn member{index}() {{ {} }}\n", "let α = a + b; ".repeat(STATEMENTS));
+        let source = format!(
+            "{padding}fn member{index}() {{ {} }}\n",
+            "let α = a + b; ".repeat(STATEMENTS)
+        );
         let tree = parser.parse(&source, None).unwrap();
         let file = PathBuf::from(format!("display{index}.rs"));
         let fragment = hasher::collect_fragments(&tree, &source, &file, MIN_NODES)
-            .into_iter().filter(|fragment| fragment.kind == "function_item").last().unwrap();
+            .into_iter()
+            .rfind(|fragment| fragment.kind == "function_item")
+            .unwrap();
         members.push(fragment);
         trees.insert(file, (tree, source));
     }
-    for (name, palette) in [("display_plain", comparison::Palette::Plain), ("display_color", comparison::Palette::Color)] {
+    for (name, palette) in [
+        ("display_plain", comparison::Palette::Plain),
+        ("display_color", comparison::Palette::Color),
+    ] {
         let mut group = c.benchmark_group(name);
         for count in DISPLAY_MEMBERS {
             let mut renderer = comparison::Renderer::new(&trees, palette);
@@ -445,8 +465,13 @@ fn bench_focused(c: &mut Criterion) {
             }
             group.bench_function(BenchmarkId::from_parameter(count), |b| {
                 b.iter(|| {
+                    renderer.begin_group();
                     for member in &members[1..count] {
-                        black_box(renderer.pair(black_box(&members[0]), black_box(member)).unwrap());
+                        black_box(
+                            renderer
+                                .pair(black_box(&members[0]), black_box(member))
+                                .unwrap(),
+                        );
                     }
                 });
             });
