@@ -97,7 +97,8 @@ fn render_text(
     let mut output = String::new();
     let mut offset = start;
     let mut match_index = 0;
-    let mut style_index = 0;
+    // Skip preceding source spans without a linear walk for every fragment.
+    let mut style_index = styles.partition_point(|span| span.bytes.end <= start);
     for (index, text) in text.split_inclusive('\n').enumerate() {
         let mut content = String::new();
         let mut matched_count = 0;
@@ -165,6 +166,25 @@ fn render_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn span_seek_preserves_output() {
+        let spans = [
+            syntax::Span { bytes: 0..3, color: "\x1b[95m" },
+            syntax::Span { bytes: 4..8, color: "\x1b[94m" },
+            syntax::Span { bytes: 8..10, color: "\x1b[93m" },
+            syntax::Span { bytes: 11..12, color: DEFAULT },
+            syntax::Span { bytes: 13..15, color: "\x1b[97m" },
+        ];
+        for start in 0..17 {
+            let matched = start..start + "α".len();
+            let skipped = spans.iter().take_while(|span| span.bytes.end <= start).count();
+            for palette in [Palette::Plain, Palette::Color] {
+                let expected = render_text("α + β", start, 42, std::slice::from_ref(&matched), &spans[skipped..], palette);
+                assert_eq!(render_text("α + β", start, 42, std::slice::from_ref(&matched), &spans, palette), expected);
+            }
+        }
+    }
 
     fn fixture() -> (Vec<Fragment>, HashMap<PathBuf, (tree_sitter::Tree, String)>) {
         let mut parser = tree_sitter::Parser::new();

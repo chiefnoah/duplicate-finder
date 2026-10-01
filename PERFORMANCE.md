@@ -49,6 +49,7 @@ Criterion stores full measurements under `target/criterion`.
 | `tsk-14`: reuse pair scores | Near detection, 2 files, 1 thread | 53.507 µs | 52.158 µs |
 | `tsk-15`: shorter rows without clearing | Shifted LCS, 512 tokens | 716.350 µs | 695.520 µs |
 | `tsk-15`: shorter rows without clearing | Asymmetric LCS, 128 then 512 tokens | 183.800 µs | 178.040 µs |
+| `tsk-16`: seek syntax spans | Color source output, 32 members | 2.073 ms | 1.387 ms |
 
 The single-row LCS experiment passed equivalence tests but increased several kernel times by 4–9%.
 The retained implementation uses two rows and omits redundant clearing.
