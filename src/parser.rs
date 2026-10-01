@@ -7,7 +7,8 @@ pub fn language_for_extension(ext: &str) -> Option<Language> {
         "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
         "py" => Some(tree_sitter_python::LANGUAGE.into()),
         "js" | "mjs" | "cjs" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "ts" | "tsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "ts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
@@ -44,6 +45,19 @@ pub fn parse_file(path: &Path) -> Result<(tree_sitter::Tree, String)> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn parse_typed_tsx() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("card.tsx");
+        fs::write(
+            &file,
+            "export function Card(props: {name: string}) { return <div>{props.name}</div>; }",
+        )
+        .unwrap();
+        let (tree, _) = parse_file(&file).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
 
     #[test]
     fn test_language_for_known_extensions() {

@@ -6,6 +6,144 @@ use crate::hasher::Fragment;
 
 const FULL_SIMILARITY: f64 = 1.0;
 
+struct Token {
+    kind: String,
+    bytes: std::ops::Range<usize>,
+}
+
+enum Direction {
+    Forward,
+    Reverse,
+}
+
+// Align leaf tokens for display. Detection still uses the full AST sequence.
+pub fn matched_ranges(
+    left: &Fragment,
+    right: &Fragment,
+    trees: &HashMap<std::path::PathBuf, (tree_sitter::Tree, String)>,
+) -> Option<Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>> {
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    display_tokens(find_node_at(&trees.get(&left.file)?.0, left)?, &mut a);
+    display_tokens(find_node_at(&trees.get(&right.file)?.0, right)?, &mut b);
+    let mut pairs = Vec::new();
+    align_tokens(&a, &b, 0, 0, &mut pairs);
+    Some(
+        pairs
+            .into_iter()
+            .map(|(i, j)| (a[i].bytes.clone(), b[j].bytes.clone()))
+            .collect(),
+    )
+}
+
+fn display_tokens(node: tree_sitter::Node, tokens: &mut Vec<Token>) {
+    let kind = normalise_kind(node.kind());
+    let mut cursor = node.walk();
+    let embedded = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "template_substitution" | "interpolation"));
+    if node.child_count() == 0 || kind == "ID" || (kind == "LIT" && !embedded) {
+        if !node.byte_range().is_empty() {
+            tokens.push(Token {
+                kind,
+                bytes: node.byte_range(),
+            });
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        display_tokens(child, tokens);
+    }
+}
+
+// Hirschberg reconstruction keeps display alignment memory linear in token counts.
+fn align_tokens(
+    a: &[Token],
+    b: &[Token],
+    offset_a: usize,
+    offset_b: usize,
+    pairs: &mut Vec<(usize, usize)>,
+) {
+    let prefix = a
+        .iter()
+        .zip(b)
+        .take_while(|(a, b)| a.kind == b.kind)
+        .count();
+    pairs.extend((0..prefix).map(|index| (offset_a + index, offset_b + index)));
+    let a = &a[prefix..];
+    let b = &b[prefix..];
+    let offset_a = offset_a + prefix;
+    let offset_b = offset_b + prefix;
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(a, b)| a.kind == b.kind)
+        .count();
+    let middle_a = &a[..a.len() - suffix];
+    let middle_b = &b[..b.len() - suffix];
+
+    if middle_a.len() == 1 {
+        if let Some(index) = middle_b
+            .iter()
+            .position(|token| token.kind == middle_a[0].kind)
+        {
+            pairs.push((offset_a, offset_b + index));
+        }
+    } else if !middle_a.is_empty() && !middle_b.is_empty() {
+        let mid = middle_a.len() / 2;
+        let forward = token_row(&middle_a[..mid], middle_b, Direction::Forward);
+        let reverse = token_row(&middle_a[mid..], middle_b, Direction::Reverse);
+        let split = (0..=middle_b.len())
+            .max_by_key(|&index| forward[index] + reverse[middle_b.len() - index])
+            .unwrap();
+        drop(forward);
+        drop(reverse);
+        align_tokens(
+            &middle_a[..mid],
+            &middle_b[..split],
+            offset_a,
+            offset_b,
+            pairs,
+        );
+        align_tokens(
+            &middle_a[mid..],
+            &middle_b[split..],
+            offset_a + mid,
+            offset_b + split,
+            pairs,
+        );
+    }
+    pairs.extend((0..suffix).map(|index| {
+        (
+            offset_a + a.len() - suffix + index,
+            offset_b + b.len() - suffix + index,
+        )
+    }));
+}
+
+fn token_row(a: &[Token], b: &[Token], direction: Direction) -> Vec<usize> {
+    let mut row = vec![0; b.len() + 1];
+    for i in 0..a.len() {
+        let mut diagonal = 0;
+        for j in 0..b.len() {
+            let (i, j_index) = match direction {
+                Direction::Forward => (i, j),
+                Direction::Reverse => (a.len() - 1 - i, b.len() - 1 - j),
+            };
+            let previous = row[j + 1];
+            row[j + 1] = if a[i].kind == b[j_index].kind {
+                diagonal + 1
+            } else {
+                row[j].max(previous)
+            };
+            diagonal = previous;
+        }
+    }
+    row
+}
+
 /// Compute structural similarity between two AST fragments.
 /// Uses a normalised node-kind sequence comparison (LCS-based).
 /// Returns a value in [0.0, 1.0].
@@ -107,43 +245,28 @@ fn normalise_kind(kind: &str) -> String {
 
 /// Find Type 3 near-duplicate clone groups.
 ///
-/// Strategy: bucket fragments by (kind, node_count ± tolerance), then
-/// compare pairs within each bucket. Only compare fragments that didn't
-/// already match exactly (i.e. have unique hashes).
+/// Strategy: bucket fragments by kind, then
+/// compare pairs with different hashes within each bucket.
 pub fn find_near_duplicates(
     fragments: &[Fragment],
     trees: &HashMap<std::path::PathBuf, (tree_sitter::Tree, String)>,
     threshold: f64,
     min_nodes: usize,
 ) -> Vec<CloneGroup> {
-    // Collect fragments that are "lonely" — their hash only appears once
-    // among all fragments, so they weren't caught by exact matching.
-    // Actually, we want to find pairs across ALL non-exact fragments,
-    // including those whose hash appeared multiple times (they're already
-    // in Type 1/2 groups). We focus on fragments with unique hashes.
-    let mut hash_counts: HashMap<u64, usize> = HashMap::new();
-    for f in fragments {
-        *hash_counts.entry(f.hash).or_default() += 1;
-    }
-
-    let lonely: Vec<&Fragment> = fragments
+    // Exact clones can anchor a near group, but same-hash pairs stay in exact output.
+    let eligible: Vec<&Fragment> = fragments
         .iter()
-        .filter(|f| hash_counts[&f.hash] == 1 && f.node_count >= min_nodes)
+        .filter(|f| f.node_count >= min_nodes)
         .collect();
 
-    if lonely.len() < 2 {
+    if eligible.len() < 2 {
         return Vec::new();
     }
 
-    // Bucket by (kind, size_bucket) where size_bucket = node_count / 3.
-    // This gives ~33% size tolerance.
-    let mut buckets: HashMap<(String, usize), Vec<&Fragment>> = HashMap::new();
-    for frag in &lonely {
-        let size_bucket = frag.node_count / 3;
-        buckets
-            .entry((frag.kind.clone(), size_bucket))
-            .or_default()
-            .push(frag);
+    // Size rejection uses the threshold bound, not arbitrary bucket boundaries.
+    let mut buckets: HashMap<String, Vec<&Fragment>> = HashMap::new();
+    for frag in &eligible {
+        buckets.entry(frag.kind.clone()).or_default().push(frag);
     }
 
     // Keep bucket order so thread schedules do not affect sort ties or deduplication.
@@ -156,7 +279,7 @@ pub fn find_near_duplicates(
                 .par_iter()
                 .map(|frag| {
                     let (tree, source) = trees.get(&frag.file)?;
-                    find_node_at(tree, frag.start_line, frag.end_line)
+                    find_node_at(tree, frag)
                         .map(|node| extract_kind_sequence(node, source.as_bytes()))
                 })
                 .collect();
@@ -193,7 +316,7 @@ fn group_bucket(
         let matches: Vec<usize> = ((i + 1)..bucket.len())
             .into_par_iter()
             .filter(|&j| {
-                if grouped[j] {
+                if grouped[j] || bucket[i].hash == bucket[j].hash {
                     return false;
                 }
                 let Some(ref seq_j) = sequences[j] else {
@@ -220,7 +343,9 @@ fn group_bucket(
             let idx = bucket
                 .iter()
                 .position(|f| {
-                    f.file == group_frags[1].file && f.start_line == group_frags[1].start_line
+                    f.file == group_frags[1].file
+                        && f.bytes == group_frags[1].bytes
+                        && f.kind == group_frags[1].kind
                 })
                 .unwrap();
             tree_similarity(seq_i, sequences[idx].as_ref().unwrap())
@@ -240,7 +365,7 @@ fn group_bucket(
 }
 
 fn matches(a: &[String], b: &[String], threshold: f64) -> bool {
-    // Use actual sequence counts: line lookup can select a larger AST node.
+    // LCS cannot exceed the smaller sequence length.
     if !can_match(a.len(), b.len(), threshold) {
         return false;
     }
@@ -265,55 +390,167 @@ fn can_match(a: usize, b: usize, threshold: f64) -> bool {
 }
 
 fn dedup_groups(groups: &mut Vec<CloneGroup>) {
-    let mut seen: std::collections::HashSet<Vec<(String, usize, usize)>> =
+    let mut seen: std::collections::HashSet<Vec<(std::path::PathBuf, usize, usize)>> =
         std::collections::HashSet::new();
     groups.retain(|g| {
         let mut key: Vec<_> = g
             .fragments
             .iter()
-            .map(|f| (f.file.display().to_string(), f.start_line, f.end_line))
+            .map(|f| (f.file.clone(), f.bytes.start, f.bytes.end))
             .collect();
         key.sort();
         seen.insert(key)
     });
 }
 
-/// Find the AST node that spans the given line range.
-fn find_node_at(tree: &tree_sitter::Tree, start_line: usize, end_line: usize) -> Option<tree_sitter::Node<'_>> {
-    let root = tree.root_node();
-    find_node_at_recursive(root, start_line, end_line)
-}
-
-fn find_node_at_recursive<'a>(
-    node: tree_sitter::Node<'a>,
-    start_line: usize,
-    end_line: usize,
-) -> Option<tree_sitter::Node<'a>> {
-    let node_start = node.start_position().row + 1;
-    let node_end = node.end_position().row + 1;
-
-    if node_start == start_line && node_end == end_line {
-        return Some(node);
-    }
-
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            if let Some(found) = find_node_at_recursive(cursor.node(), start_line, end_line) {
-                return Some(found);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+// Byte ranges and kinds identify nested nodes even when their line ranges coincide.
+fn find_node_at<'tree>(
+    tree: &'tree tree_sitter::Tree,
+    fragment: &Fragment,
+) -> Option<tree_sitter::Node<'tree>> {
+    let mut node = tree
+        .root_node()
+        .descendant_for_byte_range(fragment.bytes.start, fragment.bytes.end)?;
+    loop {
+        if node.byte_range() == fragment.bytes && node.kind() == fragment.kind {
+            return Some(node);
         }
+        node = node.parent()?;
     }
-
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_alignment_matches_lcs() {
+        let sequences: Vec<Vec<String>> = (0..=5)
+            .flat_map(|length| {
+                (0..(1 << length)).map(move |bits| {
+                    (0..length)
+                        .map(|index| {
+                            if (bits >> index) & 1 == 0 {
+                                "a".into()
+                            } else {
+                                "b".into()
+                            }
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        for a in &sequences {
+            for b in &sequences {
+                let tokens = |sequence: &[String]| {
+                    sequence
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kind)| Token {
+                            kind: kind.clone(),
+                            bytes: index..index + 1,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut pairs = Vec::new();
+                align_tokens(&tokens(a), &tokens(b), 0, 0, &mut pairs);
+                assert_eq!(pairs.len(), reference_lcs(a, b), "{a:?} {b:?}");
+                assert!(pairs.iter().all(|&(i, j)| a[i] == b[j]));
+                assert!(pairs
+                    .windows(2)
+                    .all(|pair| pair[0].0 < pair[1].0 && pair[0].1 < pair[1].1));
+            }
+        }
+    }
+
+    #[test]
+    fn display_aligns_unicode_renames() {
+        let (fragments, trees) = near_fixture(&[
+            "fn first() { let α = 1; }\n".into(),
+            "fn second() { let β = 2; }\n".into(),
+        ]);
+        let functions: Vec<_> = fragments
+            .iter()
+            .filter(|fragment| fragment.kind == "function_item")
+            .collect();
+        let pairs = matched_ranges(functions[0], functions[1], &trees).unwrap();
+        let a = &trees[&functions[0].file].1;
+        let b = &trees[&functions[1].file].1;
+        assert!(pairs
+            .iter()
+            .all(|(left, right)| a.get(left.clone()).is_some() && b.get(right.clone()).is_some()));
+        assert!(pairs
+            .iter()
+            .any(|(left, right)| &a[left.clone()] == "α" && &b[right.clone()] == "β"));
+    }
+
+    fn near_fixture(
+        sources: &[String],
+    ) -> (
+        Vec<Fragment>,
+        HashMap<std::path::PathBuf, (tree_sitter::Tree, String)>,
+    ) {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::parser::language_for_extension("rs").unwrap())
+            .unwrap();
+        let mut fragments = Vec::new();
+        let mut trees = HashMap::new();
+        for (index, source) in sources.iter().enumerate() {
+            let file = std::path::PathBuf::from(format!("{index}.rs"));
+            let tree = parser.parse(source, None).unwrap();
+            fragments.extend(crate::hasher::collect_fragments(&tree, source, &file, 5));
+            trees.insert(file, (tree, source.clone()));
+        }
+        (fragments, trees)
+    }
+
+    #[test]
+    fn near_crosses_size_buckets() {
+        let sources: Vec<_> = [6, 7]
+            .into_iter()
+            .map(|count| format!("fn f() {{\n{}\n}}\n", "let x = 1;\n".repeat(count)))
+            .collect();
+        let (fragments, trees) = near_fixture(&sources);
+        let groups = find_near_duplicates(&fragments, &trees, 0.8, 5);
+        assert!(groups
+            .iter()
+            .any(|group| group.fragments[0].kind == "function_item"));
+    }
+
+    #[test]
+    fn near_uses_exact_anchor() {
+        let sources = vec![
+            "fn f() {\nlet x = a + b;\n}\n".into(),
+            "fn g() {\nlet y = a + b;\n}\n".into(),
+            "fn h() {\nlet z = a - b;\n}\n".into(),
+        ];
+        let (fragments, trees) = near_fixture(&sources);
+        let groups = find_near_duplicates(&fragments, &trees, 0.8, 5);
+        assert!(groups.iter().any(|group| group
+            .fragments
+            .iter()
+            .any(|fragment| fragment.file == std::path::Path::new("2.rs"))));
+        assert!(groups.iter().all(|group| group
+            .fragments
+            .iter()
+            .any(|fragment| fragment.hash != group.fragments[0].hash)));
+    }
+
+    #[test]
+    fn same_line_nodes_stay_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("same.rs");
+        std::fs::write(
+            &path,
+            "fn a() { let x = a + b; } fn b() { let x = a - b; }\n",
+        )
+        .unwrap();
+        let (tree, source) = crate::parser::parse_file(&path).unwrap();
+        let fragments = crate::hasher::collect_fragments(&tree, &source, &path, 5);
+        let trees = HashMap::from([(path, (tree, source))]);
+        assert!(find_near_duplicates(&fragments, &trees, 1.0, 5).is_empty());
+    }
 
     // Use a full DP table as an independent reference for optimized comparisons.
     fn reference_lcs(a: &[String], b: &[String]) -> usize {
@@ -438,7 +675,9 @@ mod tests {
                 let idx = bucket
                     .iter()
                     .position(|f| {
-                        f.file == fragments[1].file && f.start_line == fragments[1].start_line
+                        f.file == fragments[1].file
+                            && f.bytes == fragments[1].bytes
+                            && f.kind == fragments[1].kind
                     })
                     .unwrap();
                 reference_similarity(seq_i, sequences[idx].as_ref().unwrap())
@@ -459,6 +698,7 @@ mod tests {
     fn fixture_fragment(index: usize) -> Fragment {
         Fragment {
             file: format!("{index}.rs").into(),
+            bytes: 1..2,
             start_line: 1,
             end_line: 2,
             node_count: 12,
@@ -537,13 +777,14 @@ mod tests {
             trees.insert(path, (tree, source));
         }
 
-        // Exclude exact hashes, small fragments, and absent trees or nodes.
+        // Exact hashes can anchor groups; exclude small fragments and absent nodes.
         fragments[1].hash = fragments[0].hash;
         fragments[2].node_count = 1;
         fragments.push(fixture_fragment(100));
         let mut absent_node = fragments[3].clone();
         absent_node.hash = u64::MAX;
         absent_node.start_line = 100;
+        absent_node.bytes = 1000..1001;
         fragments.push(absent_node);
 
         for threads in [1, 4] {
@@ -553,12 +794,15 @@ mod tests {
                 .unwrap();
             let groups = pool.install(|| find_near_duplicates(&fragments, &trees, 0.8, 5));
             assert_eq!(groups.len(), 1);
-            assert_eq!(groups[0].fragments.len(), 3);
+            assert_eq!(groups[0].fragments.len(), 4);
             assert_eq!(groups[0].similarity, 0.8);
             let paths: Vec<_> = groups[0].fragments.iter().map(|f| &f.file).collect();
             assert_eq!(
                 paths,
-                fragments[3..6].iter().map(|f| &f.file).collect::<Vec<_>>()
+                [0, 3, 4, 5]
+                    .into_iter()
+                    .map(|index| &fragments[index].file)
+                    .collect::<Vec<_>>()
             );
         }
     }

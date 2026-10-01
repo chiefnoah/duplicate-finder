@@ -7,7 +7,7 @@ A command-line tool that detects code clones across codebases using AST-based st
 1. **Parse** -- source files are parsed into ASTs using tree-sitter grammars.
 2. **Fragment** -- meaningful AST subtrees (functions, classes, control flow blocks, etc.) are extracted and structurally hashed. Identifiers and literals are normalised, so renamed variables or changed constants don't affect the hash (Type 2 detection).
 3. **Exact matching** -- fragments with identical hashes are grouped as exact clones.
-4. **Near-duplicate matching** -- remaining fragments are compared pairwise using an LCS-based similarity metric over their node-kind sequences (Type 3 detection).
+4. **Near-duplicate matching** -- same-kind fragments with different hashes are compared with LCS over their normalized node-kind sequences (Type 3 detection). Exact-group members can anchor near groups.
 5. **Subsumption** -- smaller clones contained within larger ones are removed to keep results actionable.
 
 Fragment extraction computes each node's normalized hash and subtree count once.
@@ -65,6 +65,8 @@ df <path> [options]
 | `--threshold <0.0-1.0>` | `0.8` | Similarity threshold for near-duplicate detection. Lower values find more distant clones. |
 | `--min-nodes <n>` | `5` | Minimum AST node count for a subtree to be considered. Raise to ignore small fragments. |
 | `--extensions <ext,...>` | all supported | Comma-separated list of file extensions to scan. |
+| `--show-similarities` | off | Show matched source tokens for each clone group. |
+| `--color <auto,always,never>` | `auto` | Color policy for source comparisons. |
 
 ### Examples
 
@@ -109,6 +111,46 @@ Clone Group 2 (2 clone(s), 28 nodes, 85% similarity, near)
 ```
 
 Progress information is printed to stderr.
+
+### Similarity output
+
+Show source comparisons with this flag:
+
+```sh
+df ./my-project --show-similarities
+```
+
+The view compares the first fragment with each remaining fragment in a group.
+A green background and bold text mark matched tokens.
+Syntax foreground colors remain visible underneath.
+Normalized identifiers and literal values can match despite different text.
+The view uses the parsed source snapshot, not a later file read.
+Display alignment uses linear memory and runs only when the flag is present.
+
+Without colors, line prefixes identify similarities:
+
+- `=`: all non-whitespace source text on the line matches structurally.
+- `~`: part of the line matches.
+- `!`: no non-whitespace source text on the line matches.
+
+The `auto` policy uses colors only in a terminal, unless a nonempty `NO_COLOR` disables them.
+The `always` policy overrides `NO_COLOR`.
+For a color-capable pager, use:
+
+```sh
+df ./my-project --show-similarities --color always | less -R
+```
+
+Tree-sitter queries provide syntax colors for the supported languages.
+Kotlin uses basic AST colors because its grammar crate does not export highlight queries.
+Embedded-language injections do not receive separate syntax themes.
+Display alignment shows structural token similarity, not semantic equivalence or a character-level patch.
+Near groups use reference-member comparisons, not all-pairs comparisons.
+For groups with more than two members, the reported similarity is the threshold, not a computed mean.
+
+The CLI rejects nonfinite thresholds and values outside `0.0..=1.0`.
+A missing scan path or a directory traversal error fails the scan.
+Individual file read errors produce warnings.
 
 ### Threads
 

@@ -7,6 +7,7 @@ use tree_sitter::{Node, Tree};
 #[derive(Debug, Clone)]
 pub struct Fragment {
     pub file: PathBuf,
+    pub bytes: std::ops::Range<usize>,
     pub start_line: usize,
     pub end_line: usize,
     pub node_count: usize,
@@ -98,6 +99,11 @@ fn is_literal(kind: &str) -> bool {
     )
 }
 
+// Literal text is replaceable; executable substitutions are not.
+fn is_interpolation(kind: &str) -> bool {
+    matches!(kind, "template_substitution" | "interpolation")
+}
+
 // Retain the former count and hash traversals as test-only output oracles.
 /// Count nodes in a subtree.
 #[cfg(test)]
@@ -129,6 +135,13 @@ fn structural_hash(node: Node, source: &[u8]) -> u64 {
 
     if is_literal(node.kind()) {
         "LIT".hash(&mut hasher);
+        let mut cursor = node.walk();
+        for child in node
+            .children(&mut cursor)
+            .filter(|child| is_interpolation(child.kind()))
+        {
+            structural_hash(child, source).hash(&mut hasher);
+        }
         return hasher.finish();
     }
 
@@ -172,6 +185,7 @@ pub fn collect_fragments(
         .filter(|(_, subtree)| subtree.node_count >= min_nodes)
         .map(|(node, subtree)| Fragment {
             file: file.to_path_buf(),
+            bytes: node.byte_range(),
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
             node_count: subtree.node_count,
@@ -217,7 +231,7 @@ fn collect_subtrees<'tree>(
     for child in node.children(&mut cursor) {
         let subtree = collect_subtrees(child, source, subtrees);
         node_count += subtree.node_count;
-        if !normalized {
+        if !normalized || (is_literal(node.kind()) && is_interpolation(child.kind())) {
             subtree.hash.hash(&mut hasher);
         }
     }
@@ -239,6 +253,41 @@ mod tests {
     use crate::parser;
     use std::fs;
 
+    #[test]
+    fn interpolation_preserves_code() {
+        for (extension, first, changed, renamed) in [
+            (
+                "js",
+                "function f() { return `${a + b}`; }",
+                "function f() { return `${a * b}`; }",
+                "function g() { return `${x + y}`; }",
+            ),
+            (
+                "py",
+                "def f():\n    return f'{a + b}'\n",
+                "def f():\n    return f'{a * b}'\n",
+                "def g():\n    return f'{x + y}'\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&crate::parser::language_for_extension(extension).unwrap())
+                .unwrap();
+            let hashes: Vec<_> = [first, changed, renamed]
+                .into_iter()
+                .map(|source| {
+                    let tree = parser.parse(source, None).unwrap();
+                    collect_fragments(&tree, source, Path::new("fixture"), 5)[0].hash
+                })
+                .collect();
+            assert_ne!(
+                hashes[0], hashes[1],
+                "{extension}: changed executable expression"
+            );
+            assert_eq!(hashes[0], hashes[2], "{extension}: renamed identifiers");
+        }
+    }
+
     // Preserve the original preorder traversal as an independent output oracle.
     fn reference_fragments(
         node: Node,
@@ -251,6 +300,7 @@ mod tests {
         if is_meaningful_root(node.kind()) && node_count >= min_nodes {
             fragments.push(Fragment {
                 file: file.to_path_buf(),
+                bytes: node.byte_range(),
                 start_line: node.start_position().row + 1,
                 end_line: node.end_position().row + 1,
                 node_count,

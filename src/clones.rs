@@ -12,7 +12,7 @@ pub struct CloneGroup {
 }
 
 /// Bucket fragments by hash, returning groups with 2+ members.
-/// Removes subsumed clones (a clone whose line range is entirely
+/// Removes subsumed clones (a clone whose byte range is entirely
 /// contained within a larger clone in the same group or file).
 pub fn find_clone_groups(fragments: Vec<Fragment>) -> Vec<CloneGroup> {
     // Bucket by hash.
@@ -52,13 +52,13 @@ pub fn find_clone_groups(fragments: Vec<Fragment>) -> Vec<CloneGroup> {
     groups
 }
 
-/// Remove fragments whose line range is entirely contained within
+/// Remove fragments whose byte range is entirely contained within
 /// another fragment in the same file.
 fn remove_subsumed(fragments: &mut Vec<Fragment>) {
     // Build a list of (file, start, end) ranges from all fragments.
     let ranges: Vec<_> = fragments
         .iter()
-        .map(|f| (f.file.clone(), f.start_line, f.end_line))
+        .map(|f| (f.file.clone(), f.bytes.start, f.bytes.end))
         .collect();
 
     fragments.retain(|frag| {
@@ -66,9 +66,9 @@ fn remove_subsumed(fragments: &mut Vec<Fragment>) {
         // strictly contains it (larger range).
         !ranges.iter().any(|(file, start, end)| {
             *file == frag.file
-                && *start <= frag.start_line
-                && *end >= frag.end_line
-                && (*start < frag.start_line || *end > frag.end_line)
+                && *start <= frag.bytes.start
+                && *end >= frag.bytes.end
+                && (*start < frag.bytes.start || *end > frag.bytes.end)
         })
     });
 }
@@ -84,10 +84,11 @@ fn remove_subsumed_groups(groups: &mut Vec<CloneGroup>) {
         let all_subsumed = groups[i].fragments.iter().all(|frag| {
             groups[..i].iter().enumerate().any(|(j, larger)| {
                 keep[j]
+                    && larger.node_count > groups[i].node_count
                     && larger.fragments.iter().any(|lf| {
                         lf.file == frag.file
-                            && lf.start_line <= frag.start_line
-                            && lf.end_line >= frag.end_line
+                            && lf.bytes.start <= frag.bytes.start
+                            && lf.bytes.end >= frag.bytes.end
                     })
             })
         });
@@ -109,9 +110,25 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn same_line_groups_stay_distinct() {
+        let mut fragments = vec![
+            make_fragment("a.rs", 1, 1, 20, 111),
+            make_fragment("b.rs", 1, 1, 20, 111),
+            make_fragment("a.rs", 1, 1, 20, 222),
+            make_fragment("b.rs", 1, 1, 20, 222),
+        ];
+        fragments[0].bytes = 0..20;
+        fragments[1].bytes = 0..20;
+        fragments[2].bytes = 21..41;
+        fragments[3].bytes = 21..41;
+        assert_eq!(find_clone_groups(fragments).len(), 2);
+    }
+
     fn make_fragment(file: &str, start: usize, end: usize, nodes: usize, hash: u64) -> Fragment {
         Fragment {
             file: PathBuf::from(file),
+            bytes: start..end,
             start_line: start,
             end_line: end,
             node_count: nodes,

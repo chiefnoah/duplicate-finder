@@ -1,15 +1,50 @@
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
 mod clones;
+mod comparison;
 mod hasher;
 mod parser;
 mod reporter;
 mod similarity;
+mod syntax;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+fn palette(choice: ColorChoice) -> comparison::Palette {
+    match choice {
+        ColorChoice::Always => comparison::Palette::Color,
+        ColorChoice::Never => comparison::Palette::Plain,
+        ColorChoice::Auto => {
+            let disabled = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+            if std::io::stdout().is_terminal() && !disabled {
+                comparison::Palette::Color
+            } else {
+                comparison::Palette::Plain
+            }
+        }
+    }
+}
+
+const THRESHOLD_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1.0;
+
+fn parse_threshold(value: &str) -> std::result::Result<f64, String> {
+    let threshold = value.parse::<f64>().map_err(|error| error.to_string())?;
+    if !threshold.is_finite() || !THRESHOLD_RANGE.contains(&threshold) {
+        return Err("Threshold must be finite and between 0.0 and 1.0.".into());
+    }
+    Ok(threshold)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "df", about = "Duplicate finder — detect code clones in codebases")]
@@ -18,7 +53,7 @@ pub struct Cli {
     pub path: PathBuf,
 
     /// Similarity threshold for near-duplicate detection (0.0–1.0)
-    #[arg(long, default_value = "0.8")]
+    #[arg(long, default_value = "0.8", value_parser = parse_threshold)]
     pub threshold: f64,
 
     /// Minimum AST node count for a subtree to be considered
@@ -28,11 +63,20 @@ pub struct Cli {
     /// Filter by file extensions (comma-separated, e.g. "rs,py,js")
     #[arg(long, value_delimiter = ',')]
     pub extensions: Option<Vec<String>>,
+
+    /// Show structurally matched source tokens with syntax colors
+    #[arg(long)]
+    show_similarities: bool,
+
+    /// Color policy for source comparisons
+    #[arg(long, value_enum, default_value = "auto")]
+    color: ColorChoice,
 }
 
 pub fn collect_files(cli: &Cli) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in WalkDir::new(&cli.path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&cli.path) {
+        let entry = entry.with_context(|| format!("Cannot scan {}", cli.path.display()))?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -97,6 +141,9 @@ fn main() -> Result<()> {
 
     // Phase 5: Report.
     reporter::print_report(&exact_groups, &near_groups);
+    if cli.show_similarities {
+        reporter::print_comparisons(&exact_groups, &near_groups, &trees_map, palette(cli.color))?;
+    }
 
     Ok(())
 }
@@ -105,6 +152,39 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn reject_missing_scan_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = Cli {
+            path: directory.path().join("missing"),
+            threshold: 0.8,
+            min_nodes: 5,
+            extensions: None,
+            show_similarities: false,
+            color: ColorChoice::Auto,
+        };
+        assert!(collect_files(&cli).is_err());
+    }
+
+    #[test]
+    fn reject_invalid_thresholds() {
+        for value in ["NaN", "inf", "-inf", "-0.1", "1.1"] {
+            let option = format!("--threshold={value}");
+            assert!(
+                Cli::try_parse_from(["df", ".", &option]).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_threshold_endpoints() {
+        for value in ["0", "1", "0.8"] {
+            let option = format!("--threshold={value}");
+            assert!(Cli::try_parse_from(["df", ".", &option]).is_ok());
+        }
+    }
 
     #[test]
     fn test_collect_files_finds_files_in_directory() {
@@ -119,6 +199,8 @@ mod tests {
             threshold: 0.8,
             min_nodes: 5,
             extensions: None,
+            show_similarities: false,
+            color: ColorChoice::Auto,
         };
 
         let files = collect_files(&cli).unwrap();
@@ -137,6 +219,8 @@ mod tests {
             threshold: 0.8,
             min_nodes: 5,
             extensions: Some(vec!["rs".to_string(), "py".to_string()]),
+            show_similarities: false,
+            color: ColorChoice::Auto,
         };
 
         let files = collect_files(&cli).unwrap();
