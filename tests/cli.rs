@@ -89,6 +89,38 @@ fn cli_errors_are_nonzero() {
 }
 
 #[test]
+fn fail_on_clones_returns_nonzero() {
+    let directory = source_fixture();
+    let output = Command::new(env!("CARGO_BIN_EXE_df"))
+        .arg(directory.path())
+        .arg("--fail-on-clones")
+        .env("RAYON_NUM_THREADS", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Found"));
+}
+
+#[test]
+fn fail_on_clones_accepts_clean_source() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("a.rs"), "fn first() { let a = 1; }\n").unwrap();
+    std::fs::write(
+        directory.path().join("b.rs"),
+        "fn second() { println!(\"unique\"); }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_df"))
+        .arg(directory.path())
+        .arg("--fail-on-clones")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+}
+
+#[test]
 fn rounded_near_keeps_label() {
     let directory = tempfile::tempdir().unwrap();
     let mut first = String::from("fn f() {\n");

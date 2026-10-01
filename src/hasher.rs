@@ -378,7 +378,10 @@ mod tests {
         // Both should have at least one fragment (the function_item)
         let fn_a = frags_a.iter().find(|f| f.kind == "function_item").unwrap();
         let fn_b = frags_b.iter().find(|f| f.kind == "function_item").unwrap();
-        assert_eq!(fn_a.hash, fn_b.hash, "identical functions should have same hash");
+        assert_eq!(
+            fn_a.hash, fn_b.hash,
+            "identical functions should have same hash"
+        );
     }
 
     #[test]
@@ -413,11 +416,7 @@ mod tests {
         fs::write(&path_a, "fn foo() { let x = 1; }").unwrap();
 
         let path_b = dir.path().join("b.rs");
-        fs::write(
-            &path_b,
-            "fn bar() { let x = 1; let y = 2; let z = 3; }",
-        )
-        .unwrap();
+        fs::write(&path_b, "fn bar() { let x = 1; let y = 2; let z = 3; }").unwrap();
 
         let (tree_a, src_a) = parser::parse_file(&path_a).unwrap();
         let (tree_b, src_b) = parser::parse_file(&path_b).unwrap();

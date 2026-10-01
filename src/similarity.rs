@@ -552,13 +552,7 @@ mod tests {
             .flat_map(|length| {
                 (0..(1 << length)).map(move |bits| {
                     (0..length)
-                        .map(|index| {
-                            if (bits >> index) & 1 == 0 {
-                                "a"
-                            } else {
-                                "b"
-                            }
-                        })
+                        .map(|index| if (bits >> index) & 1 == 0 { "a" } else { "b" })
                         .collect()
                 })
             })
@@ -1015,18 +1009,10 @@ mod tests {
 
         // Two structurally similar but not identical functions.
         let path_a = dir.path().join("a.rs");
-        fs::write(
-            &path_a,
-            "fn foo() { let x = 1; let y = 2; let z = 3; }",
-        )
-        .unwrap();
+        fs::write(&path_a, "fn foo() { let x = 1; let y = 2; let z = 3; }").unwrap();
 
         let path_b = dir.path().join("b.rs");
-        fs::write(
-            &path_b,
-            "fn bar() { let a = 1; let b = 2; let c = 4; }",
-        )
-        .unwrap();
+        fs::write(&path_b, "fn bar() { let a = 1; let b = 2; let c = 4; }").unwrap();
 
         let (tree_a, src_a) = parser::parse_file(&path_a).unwrap();
         let (tree_b, src_b) = parser::parse_file(&path_b).unwrap();

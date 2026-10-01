@@ -69,7 +69,12 @@ fn print_group(group: &CloneGroup, num: usize, kind: CloneKind) {
     );
 
     for frag in &group.fragments {
-        println!("  {}:{}-{}", frag.file.display(), frag.start_line, frag.end_line);
+        println!(
+            "  {}:{}-{}",
+            frag.file.display(),
+            frag.start_line,
+            frag.end_line
+        );
     }
     println!();
 }

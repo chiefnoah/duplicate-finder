@@ -42,6 +42,36 @@ const MEASUREMENT: Duration = Duration::from_secs(3);
 const KIND_VARIANTS: usize = 7;
 const DISPLAY_MEMBERS: [usize; 2] = [2, 32];
 const PADDING_FUNCTIONS: usize = 2048;
+const COPY_FRAGMENTS: usize = 10_000;
+const ROW_CANDIDATES: [usize; 4] = [2, 8, 32, 128];
+const SYNTAX_DEFAULT: &str = "\x1b[39m";
+// Match the production capture names to compare cached-query output exactly.
+const SYNTAX_THEME: [(&str, &str); 12] = [
+    ("attribute", "\x1b[96m"),
+    ("comment", "\x1b[90m"),
+    ("constant", "\x1b[96m"),
+    ("function", "\x1b[94m"),
+    ("keyword", "\x1b[95m"),
+    ("number", "\x1b[96m"),
+    ("operator", SYNTAX_DEFAULT),
+    ("property", "\x1b[97m"),
+    ("punctuation", SYNTAX_DEFAULT),
+    ("string", "\x1b[93m"),
+    ("type", "\x1b[92m"),
+    ("variable", "\x1b[97m"),
+];
+
+#[derive(Clone, Copy)]
+enum Dispatch {
+    Serial,
+    Parallel,
+}
+
+#[derive(Clone, Copy)]
+enum Capacity {
+    Growing,
+    Reserved,
+}
 
 type Parsed = Vec<(PathBuf, Tree, String)>;
 
@@ -478,6 +508,233 @@ fn bench_focused(c: &mut Criterion) {
         }
         group.finish();
     }
+
+    // Cold output includes query compilation and syntax parsing for each file.
+    let mut group = c.benchmark_group("display_color_cold");
+    for count in DISPLAY_MEMBERS {
+        group.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter(|| {
+                let mut renderer = comparison::Renderer::new(&trees, comparison::Palette::Color);
+                for member in &members[1..count] {
+                    black_box(renderer.pair(&members[0], member).unwrap());
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_assessment(c: &mut Criterion) {
+    let corpus = Corpus::synthetic(Workload::Near, FILE_COUNTS[1]);
+    let mut copies = c.benchmark_group("fragment_copy");
+    copies.throughput(Throughput::Elements(corpus.fragments.len() as u64));
+    copies.bench_function("128_files", |b| {
+        b.iter(|| black_box(&corpus.fragments).clone())
+    });
+    let many = vec![corpus.fragments[0].clone(); COPY_FRAGMENTS];
+    copies.throughput(Throughput::Elements(many.len() as u64));
+    copies.bench_function("10000_fragments", |b| b.iter(|| black_box(&many).clone()));
+    copies.finish();
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&parser::language_for_extension("rs").unwrap())
+        .unwrap();
+    let mut capacity = c.benchmark_group("sequence_capacity");
+    for statements in SEQUENCE_LENGTHS {
+        let source = format!("fn f() {{ {} }}", "let x = a + b; ".repeat(statements));
+        let tree = parser.parse(&source, None).unwrap();
+        let expected = similarity::extract_kind_sequence(tree.root_node(), source.as_bytes());
+        for (name, allocation) in [
+            ("growing", Capacity::Growing),
+            ("reserved", Capacity::Reserved),
+        ] {
+            assert_eq!(
+                reserve_sequence(tree.root_node(), expected.len(), allocation),
+                expected
+            );
+            capacity.bench_function(BenchmarkId::new(name, statements), |b| {
+                b.iter(|| {
+                    reserve_sequence(black_box(tree.root_node()), expected.len(), allocation)
+                });
+            });
+        }
+    }
+    capacity.finish();
+
+    let sequences: Vec<_> = (0..=ROW_CANDIDATES[3])
+        .map(|index| {
+            let source = source_code(index);
+            let tree = parser.parse(&source, None).unwrap();
+            similarity::extract_kind_sequence(tree.root_node(), source.as_bytes())
+        })
+        .collect();
+    let mut rows = c.benchmark_group("candidate_row");
+    for threads in THREAD_COUNTS {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for count in ROW_CANDIDATES {
+            let candidates = &sequences[..=count];
+            let expected = select_row(candidates, Dispatch::Serial);
+            assert_eq!(
+                pool.install(|| select_row(candidates, Dispatch::Parallel)),
+                expected
+            );
+            for (name, dispatch) in [
+                ("serial", Dispatch::Serial),
+                ("parallel", Dispatch::Parallel),
+            ] {
+                rows.bench_function(BenchmarkId::new(format!("{name}/t{threads}"), count), |b| {
+                    b.iter(|| pool.install(|| select_row(black_box(candidates), dispatch)));
+                });
+            }
+        }
+    }
+    rows.finish();
+
+    for extension in ["rs", "js"] {
+        let language = parser::language_for_extension(extension).unwrap();
+        let query = match extension {
+            "rs" => tree_sitter_rust::HIGHLIGHTS_QUERY.to_owned(),
+            "js" => format!(
+                "{}\n{}",
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+            ),
+            _ => unreachable!(),
+        };
+        let source = match extension {
+            "rs" => source_code(0),
+            "js" => "function f(a, b) { return `${a + b}`; }\n".into(),
+            _ => unreachable!(),
+        };
+        c.bench_function(&format!("syntax_config/{extension}"), |b| {
+            b.iter(|| {
+                tree_sitter_highlight::HighlightConfiguration::new(
+                    language.clone(),
+                    extension,
+                    black_box(&query),
+                    "",
+                    "",
+                )
+                .unwrap()
+            });
+        });
+        let mut config =
+            tree_sitter_highlight::HighlightConfiguration::new(language, extension, &query, "", "")
+                .unwrap();
+        config.configure(&SYNTAX_THEME.map(|(name, _)| name));
+        let mut highlighter = tree_sitter_highlight::Highlighter::new();
+        let expected: Vec<_> = syntax::spans(&source, extension)
+            .unwrap()
+            .into_iter()
+            .map(|span| (span.bytes, span.color))
+            .collect();
+        assert_eq!(cached_syntax(&mut highlighter, &config, &source), expected);
+        c.bench_function(&format!("syntax_cold/{extension}"), |b| {
+            b.iter(|| syntax::spans(black_box(&source), extension).unwrap());
+        });
+        c.bench_function(&format!("syntax_reuse/{extension}"), |b| {
+            b.iter(|| cached_syntax(&mut highlighter, &config, black_box(&source)));
+        });
+    }
+}
+
+// Benchmark-only copies isolate reservation without a production API change.
+fn reserve_sequence(
+    node: tree_sitter::Node,
+    count: usize,
+    capacity: Capacity,
+) -> Vec<&'static str> {
+    let mut sequence = match capacity {
+        Capacity::Growing => Vec::new(),
+        Capacity::Reserved => Vec::with_capacity(count),
+    };
+    reserve_walk(node, &mut sequence);
+    sequence
+}
+
+fn reserve_walk(node: tree_sitter::Node, sequence: &mut Vec<&'static str>) {
+    let kind = match node.kind() {
+        "identifier"
+        | "field_identifier"
+        | "type_identifier"
+        | "shorthand_field_identifier"
+        | "property_identifier" => "ID",
+        "integer_literal"
+        | "float_literal"
+        | "string_literal"
+        | "string"
+        | "raw_string_literal"
+        | "char_literal"
+        | "boolean_literal"
+        | "true"
+        | "false"
+        | "none"
+        | "null"
+        | "number"
+        | "template_string"
+        | "interpreted_string_literal"
+        | "rune_literal" => "LIT",
+        other => other,
+    };
+    sequence.push(kind);
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            reserve_walk(cursor.node(), sequence);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+// These rows model same-kind, different-hash candidates with valid cached sequences.
+fn select_row(sequences: &[Vec<&str>], dispatch: Dispatch) -> Vec<(usize, f64)> {
+    let select = |index: usize| {
+        let score = similarity::tree_similarity(&sequences[0], &sequences[index]);
+        (score >= DEFAULT_THRESHOLD).then_some((index, score))
+    };
+    match dispatch {
+        Dispatch::Serial => (1..sequences.len()).filter_map(select).collect(),
+        Dispatch::Parallel => (1..sequences.len())
+            .into_par_iter()
+            .filter_map(select)
+            .collect(),
+    }
+}
+
+fn cached_syntax(
+    highlighter: &mut tree_sitter_highlight::Highlighter,
+    config: &tree_sitter_highlight::HighlightConfiguration,
+    source: &str,
+) -> Vec<(std::ops::Range<usize>, &'static str)> {
+    let mut stack = Vec::new();
+    let mut spans = Vec::new();
+    for event in highlighter
+        .highlight(config, source.as_bytes(), None, |_| None)
+        .unwrap()
+    {
+        match event.unwrap() {
+            tree_sitter_highlight::HighlightEvent::HighlightStart(highlight) => {
+                stack.push(highlight.0)
+            }
+            tree_sitter_highlight::HighlightEvent::HighlightEnd => {
+                stack.pop();
+            }
+            tree_sitter_highlight::HighlightEvent::Source { start, end } => {
+                let color = stack
+                    .last()
+                    .map(|&index| SYNTAX_THEME[index].1)
+                    .unwrap_or(SYNTAX_DEFAULT);
+                spans.push((start..end, color));
+            }
+        }
+    }
+    spans
 }
 
 criterion_group! {
@@ -486,6 +743,6 @@ criterion_group! {
         .sample_size(SAMPLE_SIZE)
         .warm_up_time(WARMUP)
         .measurement_time(MEASUREMENT);
-    targets = bench_stages, bench_kernels, bench_focused
+    targets = bench_stages, bench_kernels, bench_focused, bench_assessment
 }
 criterion_main!(benchmarks);

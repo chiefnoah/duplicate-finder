@@ -205,7 +205,11 @@ mod tests {
         ];
 
         let groups = find_clone_groups(frags);
-        assert_eq!(groups.len(), 1, "smaller group should be subsumed by larger");
+        assert_eq!(
+            groups.len(),
+            1,
+            "smaller group should be subsumed by larger"
+        );
         assert_eq!(groups[0].node_count, 30);
     }
 }

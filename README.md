@@ -44,13 +44,36 @@ The binary is written to `target/release/df`.
 ### Nix development shell
 
 The shell provides Rust, Cargo, rustfmt, Clippy, and a C compiler for the tree-sitter grammars.
-On macOS, it also provides `libiconv` and selects the Nix linker.
+It installs the configured `git-hooks.nix` hooks. On macOS, it also provides `libiconv` and selects the Nix linker.
 
 ```sh
 nix develop path:.
 cargo test
 cargo build --release
 ```
+
+The shell installs the hooks on entry. Run them with `pre-commit run --all-files`.
+The duplicate-finder hook in `nix/git-hooks.nix` is opt-in here because this source tree contains clone groups.
+
+Build the Nix package with `nix build`. The flake exposes it as both
+`.#df` and `.#default`.
+
+### git-hooks.nix
+
+Import the custom hook set and pass it to `git-hooks.nix`:
+
+```nix
+inputs.git-hooks.lib.${system}.run {
+  src = ./.;
+  hooks = import ./nix/git-hooks.nix {
+    inherit (pkgs) lib;
+    package = self.packages.${system}.df;
+  };
+}
+```
+
+The hook scans the repository and fails when it finds clone groups.
+It uses `--fail-on-clones`; normal `df` runs still exit successfully.
 
 ## Usage
 
@@ -67,6 +90,7 @@ df <path> [options]
 | `--extensions <ext,...>` | all supported | Comma-separated list of file extensions to scan. |
 | `--show-similarities` | off | Show matched source tokens for each clone group. |
 | `--color <auto,always,never>` | `auto` | Color policy for source comparisons. |
+| `--fail-on-clones` | off | Exit with an error when clone groups exist. |
 
 ### Examples
 

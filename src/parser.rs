@@ -25,8 +25,8 @@ pub fn parse_file(path: &Path) -> Result<(tree_sitter::Tree, String)> {
         .and_then(|e| e.to_str())
         .ok_or_else(|| anyhow!("no extension: {}", path.display()))?;
 
-    let language = language_for_extension(ext)
-        .ok_or_else(|| anyhow!("unsupported language: .{ext}"))?;
+    let language =
+        language_for_extension(ext).ok_or_else(|| anyhow!("unsupported language: .{ext}"))?;
 
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("failed to read {}: {e}", path.display()))?;
@@ -87,7 +87,11 @@ mod tests {
     fn test_parse_scala_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.scala");
-        fs::write(&path, "object Main {\n  def hello(): Unit = println(\"hi\")\n}\n").unwrap();
+        fs::write(
+            &path,
+            "object Main {\n  def hello(): Unit = println(\"hi\")\n}\n",
+        )
+        .unwrap();
 
         let (tree, _source) = parse_file(&path).unwrap();
         assert!(!tree.root_node().has_error());

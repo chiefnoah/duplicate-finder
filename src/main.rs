@@ -47,7 +47,10 @@ fn parse_threshold(value: &str) -> std::result::Result<f64, String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "df", about = "Duplicate finder — detect code clones in codebases")]
+#[command(
+    name = "df",
+    about = "Duplicate finder — detect code clones in codebases"
+)]
 pub struct Cli {
     /// Path to scan for duplicates
     pub path: PathBuf,
@@ -67,6 +70,10 @@ pub struct Cli {
     /// Show structurally matched source tokens with syntax colors
     #[arg(long)]
     show_similarities: bool,
+
+    /// Exit with an error when clone groups are found
+    #[arg(long)]
+    fail_on_clones: bool,
 
     /// Color policy for source comparisons
     #[arg(long, value_enum, default_value = "auto")]
@@ -145,6 +152,10 @@ fn main() -> Result<()> {
         reporter::print_comparisons(&exact_groups, &near_groups, &trees_map, palette(cli.color))?;
     }
 
+    if cli.fail_on_clones && (!exact_groups.is_empty() || !near_groups.is_empty()) {
+        anyhow::bail!("Clone groups found.");
+    }
+
     Ok(())
 }
 
@@ -162,6 +173,7 @@ mod tests {
             min_nodes: 5,
             extensions: None,
             show_similarities: false,
+            fail_on_clones: false,
             color: ColorChoice::Auto,
         };
         assert!(collect_files(&cli).is_err());
@@ -200,6 +212,7 @@ mod tests {
             min_nodes: 5,
             extensions: None,
             show_similarities: false,
+            fail_on_clones: false,
             color: ColorChoice::Auto,
         };
 
@@ -220,6 +233,7 @@ mod tests {
             min_nodes: 5,
             extensions: Some(vec!["rs".to_string(), "py".to_string()]),
             show_similarities: false,
+            fail_on_clones: false,
             color: ColorChoice::Auto,
         };
 
